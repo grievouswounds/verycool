@@ -1,0 +1,14 @@
+bun test v1.3.14 (0d9b296a)
+
+test/transaction.test.ts:
+(pass) Cubane EIP-1559 transaction signing > produces deterministic typed transaction bytes without exposing the key [37.46ms]
+
+test/rpc.test.ts:
+(pass) Cubane EVM boundary > initializes JavaScript cryptography and passes startup vectors [0.04ms]
+(pass) Cubane EVM boundary > computes the canonical ERC-20 approve selector [0.24ms]
+(pass) Cubane EVM boundary > validates JSON-RPC chain IDs [6.15ms]
+
+ 4 pass
+ 0 fail
+ 6 expect() calls
+Ran 4 tests across 2 files. [356.00ms]

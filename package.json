@@ -1,0 +1,55 @@
+{
+  "name": "aqua-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "aube@1.17.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "check": "aube run policy && aube run typecheck && turbo run lint test build && aube run codegen:check && aube run docs:check",
+    "codegen": "bun scripts/codegen.ts",
+    "codegen:check": "bun scripts/codegen.ts --check",
+    "docs:check": "bun scripts/docs-check.ts",
+    "dev": "bun --hot scripts/dev.ts",
+    "lint": "eslint . && bun scripts/no-any.ts",
+    "policy": "bun scripts/dependency-policy.ts && bun scripts/no-any.ts",
+    "start": "bun apps/api/src/main.ts",
+    "test": "bun test",
+    "test:contracts": "cd contracts && forge test --offline",
+    "db:migrate": "bun scripts/migrate.ts",
+    "test:integration": "bun test test/integration",
+    "test:protocol": "bun test test/protocol",
+    "type-coverage": "type-coverage --strict --at-least 100",
+    "typecheck": "tsc --noEmit && type-coverage --strict --at-least 100"
+  },
+  "dependencies": {
+    "@hazae41/base16.wasm": "1.0.10",
+    "@hazae41/cubane": "0.3.12",
+    "@hazae41/cursor": "1.2.4",
+    "@hazae41/keccak256": "2.0.4",
+    "@hazae41/secp256k1": "2.0.8",
+    "@hazae41/secp256k1.wasm": "1.0.21",
+    "@hazae41/sha3.wasm": "1.0.7",
+    "@noble/curves": "1.8.1",
+    "@noble/hashes": "1.7.1",
+    "lossless-json": "^4.3.1",
+    "paseto-ts": "2.0.6",
+    "secure-json-parse": "4.1.0",
+    "swagger-ui-dist": "5.30.3",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/bun": "1.4.1",
+    "eslint": "10.10.0",
+    "jiti": "^2.7.0",
+    "turbo": "2.10.12",
+    "type-coverage": "2.30.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.69.0"
+  }
+}

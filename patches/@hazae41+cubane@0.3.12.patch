@@ -1,0 +1,69 @@
+diff --git a/dist/types/mods/abi/types/address/address.d.ts b/dist/types/mods/abi/types/address/address.d.ts
+--- a/dist/types/mods/abi/types/address/address.d.ts
++++ b/dist/types/mods/abi/types/address/address.d.ts
+@@ -1,3 +1,4 @@
++import * as _hazae41_hexane from "@hazae41/hexane";
+ import { RawHexString } from '@hazae41/hexane';
+ import { Cursor } from '@hazae41/cursor';
+ import { TextCursor } from '../../../../libs/cursor/cursor.js';
+diff --git a/dist/types/mods/abi/types/bytes/static.d.ts b/dist/types/mods/abi/types/bytes/static.d.ts
+--- a/dist/types/mods/abi/types/bytes/static.d.ts
++++ b/dist/types/mods/abi/types/bytes/static.d.ts
+@@ -1,3 +1,4 @@
++import * as _hazae41_hexane from "@hazae41/hexane";
+ import { ZeroHexString, RawHexString } from '@hazae41/hexane';
+ import { Cursor } from '@hazae41/cursor';
+ import { TextCursor } from '../../../../libs/cursor/cursor.js';
+diff --git a/dist/types/mods/abi/types/int/int.d.ts b/dist/types/mods/abi/types/int/int.d.ts
+--- a/dist/types/mods/abi/types/int/int.d.ts
++++ b/dist/types/mods/abi/types/int/int.d.ts
+@@ -1,3 +1,4 @@
++import * as _hazae41_hexane from "@hazae41/hexane";
+ import { RawHexString } from '@hazae41/hexane';
+ import { Cursor } from '@hazae41/cursor';
+ import { TextCursor } from '../../../../libs/cursor/cursor.js';
+diff --git a/dist/types/mods/abi/types/uint/uint.d.ts b/dist/types/mods/abi/types/uint/uint.d.ts
+--- a/dist/types/mods/abi/types/uint/uint.d.ts
++++ b/dist/types/mods/abi/types/uint/uint.d.ts
+@@ -1,3 +1,4 @@
++import * as _hazae41_hexane from "@hazae41/hexane";
+ import { RawHexString } from '@hazae41/hexane';
+ import { Cursor } from '@hazae41/cursor';
+ import { TextCursor } from '../../../../libs/cursor/cursor.js';
+diff --git a/dist/types/mods/abi/types.d.ts b/dist/types/mods/abi/types.d.ts
+--- a/dist/types/mods/abi/types.d.ts
++++ b/dist/types/mods/abi/types.d.ts
+@@ -2,7 +2,7 @@
+ import { Cursor } from '@hazae41/cursor';
+ import { TextCursor } from '../../libs/cursor/cursor.js';
+
+-interface AbiFactory<C = any, F = any, S extends AbiInstance<any, any> = any> extends Readable<S> {
++interface AbiFactory<C = any, F = any, S extends AbiInstance<any, any> = any> {
+     readonly dynamic: boolean;
+     create(create: C): S;
+     fromOrThrow(from: F): S;
+@@ -32,7 +32,7 @@
+         readonly [I in keyof T]: Json<T[I]>;
+     };
+ }
+-interface AbiInstance<I = any, J = any> extends Writable {
++interface AbiInstance<I = any, J = any> {
+     readonly dynamic: boolean;
+     intoOrThrow(): I;
+     encodeOrThrow(): string;
+diff --git a/dist/types/mods/secp256k1/signing/index.d.ts b/dist/types/mods/secp256k1/signing/index.d.ts
+--- a/dist/types/mods/secp256k1/signing/index.d.ts
++++ b/dist/types/mods/secp256k1/signing/index.d.ts
+@@ -1,3 +1,4 @@
++import * as _hazae41_hexane from "@hazae41/hexane";
+ import { ZeroHexString } from '@hazae41/hexane';
+ import { Box } from '@hazae41/box';
+ import { Uint8Array } from '@hazae41/bytes';
+diff --git a/dist/types/mods/signer/index.d.ts b/dist/types/mods/signer/index.d.ts
+--- a/dist/types/mods/signer/index.d.ts
++++ b/dist/types/mods/signer/index.d.ts
+@@ -1,3 +1,4 @@
++import * as _hazae41_hexane from "@hazae41/hexane";
+ import { RsvBytesSignature } from '../secp256k1/signature/index.js';
+ import { SigningKey, ZeroHexSigningKey, BytesSigningKey, ExtSigningKey } from '../secp256k1/signing/index.js';
+ import { Box } from '@hazae41/box';

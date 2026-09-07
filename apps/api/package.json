@@ -1,0 +1,1 @@
+{"name":"@aqua/api","version":"0.1.0","private":true,"type":"module","scripts":{"build":"bun build src/main.ts --target=bun --outdir=dist","typecheck":"tsc --noEmit","lint":"eslint src","test":"bun test --pass-with-no-tests"}}

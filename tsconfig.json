@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["bun"],
+    "strict": true,
+    "noImplicitAny": true,
+    "skipLibCheck": false,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "useUnknownInCatchVariables": true,
+    "noImplicitReturns": true,
+    "noUncheckedSideEffectImports": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "declaration": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@aqua/core": ["packages/core/src/index.ts"],
+      "@aqua/evm": ["packages/evm/src/index.ts"],
+      "@aqua/contracts": ["packages/contracts/src/index.ts"],
+      "@aqua/adapters": ["packages/adapters/src/index.ts"],
+      "@aqua/activity": ["packages/activity/src/index.ts"],
+      "@aqua/orderbook": ["packages/orderbook/src/index.ts"]
+    }
+  },
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "eslint.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

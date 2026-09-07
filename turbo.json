@@ -1,0 +1,17 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "dangerouslyDisablePackageManagerCheck": true,
+  "tasks": {
+    "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
+    "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
+    "lint": { "dependsOn": ["^lint"], "outputs": [] },
+    "type-coverage": { "dependsOn": ["^type-coverage"], "outputs": [] },
+    "codegen": { "cache": true, "outputs": ["packages/contracts/src/generated/**"] },
+    "codegen:check": { "dependsOn": ["codegen"], "outputs": [] },
+    "test": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
+    "test:integration": { "dependsOn": ["build"], "cache": false, "outputs": [] },
+    "test:protocol": { "dependsOn": ["build"], "cache": false, "outputs": [] },
+    "docs:check": { "outputs": [] },
+    "check": { "dependsOn": ["typecheck", "lint", "type-coverage", "codegen:check", "test", "docs:check", "build"], "outputs": [] }
+  }
+}

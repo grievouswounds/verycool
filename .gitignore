@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+result
+result-*
+.env
+.data/
+.direnv/
+*.tsbuildinfo

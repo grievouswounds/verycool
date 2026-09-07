@@ -1,0 +1,7 @@
+packages:
+  - apps/*
+  - packages/*
+strictDepBuilds: true
+allowBuilds: {}
+patchedDependencies:
+  '@hazae41/cubane@0.3.12': patches/@hazae41+cubane@0.3.12.patch

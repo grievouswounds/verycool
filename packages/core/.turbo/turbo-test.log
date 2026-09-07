@@ -1,0 +1,35 @@
+bun test v1.3.14 (0d9b296a)
+
+test/schemas.test.ts:
+(pass) public request schemas > accepts a canonical direct request [9.19ms]
+(pass) public request schemas > requires exactly one swap amount and one deadline form [0.53ms]
+(pass) public request schemas > rejects unknown fields and leading-zero amounts [18.63ms]
+
+test/trading-schemas.test.ts:
+(pass) agent-first trading input language > recognizes a minimal resting limit order and applies explicit defaults [4.57ms]
+(pass) agent-first trading input language > recognizes compact public book and personal order queries [0.87ms]
+(pass) agent-first trading input language > rejects ambiguous policies, unknown fields, and JSON numbers [4.66ms]
+(pass) agent-first trading input language > recognizes conditional, OCO, bracket, batch, cancellation, execution, and wrapping variants [2.94ms]
+
+test/price.test.ts:
+(pass) maker-favouring decimal price conversion > rounds quote received up for a base-denominated sell [10.12ms]
+(pass) maker-favouring decimal price conversion > rounds quote paid down for a base-denominated buy [0.04ms]
+(pass) maker-favouring decimal price conversion > never uses exponent notation or floating point [0.06ms]
+
+test/json.test.ts:
+(pass) strict JSON recognizer > rejects duplicate and prototype-sensitive object keys [1.49ms]
+(pass) strict JSON recognizer > rejects integers that cannot be represented safely [1.11ms]
+
+test/activity-schemas.test.ts:
+(pass) activity input languages > accepts minimal subscription and bounded list query [11.92ms]
+(pass) activity input languages > rejects unknown and duplicate-language representations [0.26ms]
+(pass) activity input languages > requires explicit confirmation for an all-data wipe [3.06ms]
+
+test/decimal.test.ts:
+(pass) canonical token decimal language > converts a decimal token amount without floating point arithmetic [0.08ms]
+(pass) canonical token decimal language > rejects exponent notation and excess precision [0.04ms]
+
+ 17 pass
+ 0 fail
+ 34 expect() calls
+Ran 17 tests across 6 files. [146.00ms]
