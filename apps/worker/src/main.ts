@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { ActivityCollector, RpcActivityChain } from "@aqua/activity";
 import { PostgresActivityRepository, createDatabase, closeDatabase } from "@aqua/adapters";
 import { loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
 import { initializeCubane, JsonRpcClient } from "@aqua/evm";
 
 const manifest=await loadRuntimeManifest(Bun.argv);const defaults=localProfileDefaults;
+const readyIndex=Bun.argv.indexOf("--ready-out");const readyOut=readyIndex<0?null:Bun.argv[readyIndex+1]??null;
 initializeCubane();
 const database=createDatabase(manifest.services.databaseUrl);await database.connect();
 const repository=new PostgresActivityRepository(database);await repository.initialize();
@@ -13,6 +15,6 @@ console.log(JSON.stringify({level:"info",component:"activity-worker",manifestHas
 const holder=randomUUID();let stopped=false;let timer:ReturnType<typeof setTimeout>|undefined;
 const tick=async():Promise<void>=>{const now=new Date();const until=new Date(now.getTime()+defaults.activityWorkerLeaseSeconds*1_000);if(await repository.acquireLease("erc20-activity",holder,now,until))await collector.runOnce();};
 const schedule=():void=>{if(stopped)return;const interval=defaults.activityPollIntervalSeconds*1_000;timer=setTimeout(()=>{void tick().catch((error:unknown)=>{console.error(JSON.stringify({level:"error",component:"activity-worker",message:error instanceof Error?error.message:"Unknown worker error"}));}).finally(schedule);},interval-Date.now()%interval);};
-await tick();schedule();
-const shutdown=async():Promise<void>=>{stopped=true;if(timer!==undefined)clearTimeout(timer);await closeDatabase(database);};
+await tick();if(readyOut!==null)await Bun.write(readyOut,"ready\n");schedule();
+const shutdown=async():Promise<void>=>{stopped=true;if(timer!==undefined)clearTimeout(timer);if(readyOut!==null)await rm(readyOut,{force:true});await closeDatabase(database);};
 process.once("SIGTERM",()=>{void shutdown();});process.once("SIGINT",()=>{void shutdown();});

@@ -34,6 +34,6 @@
       "@aqua/quoter": ["packages/quoter/src/index.ts"]
     }
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "eslint.config.ts"],
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "eslint.config.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -1,26 +1,9 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { addressSchema, hashSchema, limitOrderRequestSchema, runtimeManifestSchema } from "@aqua/core";
+import { ProtocolService } from "@aqua/contracts";
+import { hexToBytes, JsonRpcClient, keccakHex } from "@aqua/evm";
 import { z } from "zod";
-import { addressSchema, hashSchema } from "@aqua/core";
-import { JsonRpcClient } from "@aqua/evm";
-
-/**
- * Deploys the Aqua / SwapVM / x402 / Permit2 protocol stack plus two fixture ERC-20 tokens to a
- * local Anvil chain, and writes the `--deployments` JSON that `generate-local-manifest.ts`
- * consumes. This is the local-only counterpart to a real deployment: on a real chain, these
- * contracts are deployed once by their own maintainers (or a real deployment pipeline) and their
- * addresses are configuration, not something re-derived on every "dev" start.
- *
- * Requires, via environment variables:
- *   AQUA_ROOT, AQUA_STATE_DIR                         (already exported by the "dev" flow)
- *   AQUA_UPSTREAM, SWAPVM_UPSTREAM, X402_UPSTREAM, PERMIT2_UPSTREAM
- *                                                      (nix store paths to the pinned protocol sources)
- *   AQUA_LOCAL_RPC_URL, AQUA_BROKER_SOCKET, AQUA_API_PORT, AQUA_FACILITATOR_PORT, DATABASE_URL
- *
- * and expects `$AQUA_STATE_DIR/identity.json` (written by "secret-broker" at startup) to already
- * exist, since the on-chain AquaIntentController's immutable "operator" must be the broker's real
- * keeper address -- the same address that will later sign `observe`/`activate` calls.
- */
 
 const env = (name: string): string => {
   const value = Bun.env[name];
@@ -41,31 +24,35 @@ const upstream = {
 const buildDir = `${stateDir}/chain-build`;
 const deploymentsPath = `${stateDir}/deployments.json`;
 const addressesPath = `${stateDir}/deployment-addresses.json`;
+const manifestPath = `${stateDir}/runtime-manifest.json`;
 
-// Anvil's well-known first "test test test ... junk" mnemonic account (index 0). Anvil prints
-// this exact key at startup on every local chain; it is public and deterministic by design, so
-// it is only ever safe to use as a throwaway local deployer that never holds real funds.
+// Public Anvil account 0. It must never be used on a non-local chain.
 const DEPLOYER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const DEPLOYER_ADDRESS = addressSchema.parse("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+const FIXTURE_MAKER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const FIXTURE_MAKER = addressSchema.parse("0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+const PERMIT2_ADDRESS = addressSchema.parse("0x000000000022D473030F116dDEE9F6B43aC78BA3");
+const X402_EXACT_PROXY_ADDRESS = addressSchema.parse("0x402085c248eea27d92e8b30b2c58ed07f9e20001");
+const CREATE2_DEPLOYER = addressSchema.parse("0x4e59b44847b379578588920cA78FbF26c0B4956C");
+const X402_EXACT_SALT = "0x0000000000000000000000000000000000000000000000003000000007263b0e";
+const SWAP_SELECTOR = "0xf4d2d412";
 
 const identity = z.object({
-  agent: addressSchema, facilitator: addressSchema, keeper: addressSchema,
-  pasetoPublicKey: z.string(),
+  agent: addressSchema, facilitator: addressSchema, keeper: addressSchema, pasetoPublicKey: z.string(),
 }).parse(await Bun.file(`${stateDir}/identity.json`).json());
-
 const rpc = new JsonRpcClient(new URL(rpcUrl), 10_000);
 
-const alreadyDeployed = async (): Promise<boolean> => {
-  if (!existsSync(deploymentsPath) || !existsSync(addressesPath)) return false;
-  try {
-    const recorded = z.object({ permit2: addressSchema }).loose().parse(await Bun.file(addressesPath).json());
-    // Anvil state does not survive a chain wiped between runs (no --state persistence, or a
-    // deliberately fresh AQUA_STATE_DIR); checking that code still exists at a previously
-    // recorded address is what actually distinguishes "safe to reuse" from "stale record".
-    return (await rpc.getCode(recorded.permit2)) !== "0x";
-  } catch {
-    return false;
-  }
+let rpcId = 0;
+const rpcRequest = async (method: string, params: readonly unknown[]): Promise<unknown> => {
+  const id = ++rpcId;
+  const response = await fetch(rpcUrl, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id, method, params }), signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`RPC ${method} returned HTTP ${String(response.status)}`);
+  const body = z.object({ jsonrpc: z.literal("2.0"), id: z.number(), result: z.unknown().optional(), error: z.unknown().optional() }).parse(await response.json());
+  if (body.id !== id || body.error !== undefined) throw new Error(`RPC ${method} failed: ${JSON.stringify(body.error)}`);
+  return body.result;
 };
 
 const run = async (command: readonly string[], cwd: string): Promise<string> => {
@@ -80,134 +67,217 @@ const run = async (command: readonly string[], cwd: string): Promise<string> => 
 const prepareCopy = async (source: string, dest: string): Promise<void> => {
   await mkdir(buildDir, { recursive: true });
   await run(["rm", "-rf", dest], buildDir);
-  // The nix store source is read-only; forge (build artifacts, cache) and bun (node_modules)
-  // both need to write into their own copy of it.
   await run(["cp", "-r", source, dest], buildDir);
   await run(["chmod", "-R", "u+w", dest], buildDir);
 };
 
-const bunInstall = async (cwd: string): Promise<void> => {
-  await run(["bun", "install"], cwd);
-};
+type Installation = "create" | "create2" | "anvil-set-code";
+interface Deployed {
+  readonly address: string;
+  readonly transactionHash?: string | undefined;
+  readonly blockNumber: string;
+  readonly installation: Installation;
+}
+const deploymentSchema = z.object({
+  address: addressSchema, transactionHash: hashSchema.optional(),
+  blockNumber: z.string().regex(/^(?:0|[1-9][0-9]*)$/u), installation: z.enum(["create", "create2", "anvil-set-code"]),
+}).strict();
+const contractsSchema = z.object({
+  aqua: deploymentSchema, aquaSwapRouter: deploymentSchema, limitSwapRouter: deploymentSchema,
+  wrappedNativeToken: deploymentSchema, intentController: deploymentSchema, orderVaultFactory: deploymentSchema,
+  boundedMatcher: deploymentSchema, permit2: deploymentSchema, x402ExactPermit2Proxy: deploymentSchema,
+}).strict();
+const contractNames = [
+  "aqua", "aquaSwapRouter", "limitSwapRouter", "wrappedNativeToken", "intentController",
+  "orderVaultFactory", "boundedMatcher", "permit2", "x402ExactPermit2Proxy",
+] as const;
+const evidenceSchema = z.object({
+  contracts: contractsSchema, tokens: z.array(deploymentSchema).length(2),
+  seedTransactions: z.array(hashSchema).min(10),
+  seedOrders: z.array(z.object({ orderHash: hashSchema, transactionHash: hashSchema }).strict()).length(2),
+}).loose();
 
-interface Deployed { readonly address: string; readonly transactionHash: string }
+const receiptBlock = async (transactionHash: string): Promise<string> => {
+  const receipt = z.object({ status: z.literal("0x1"), blockNumber: z.string() }).loose()
+    .parse(await rpcRequest("eth_getTransactionReceipt", [transactionHash]));
+  return BigInt(receipt.blockNumber).toString(10);
+};
+const currentBlock = async (): Promise<string> => BigInt(z.string().parse(await rpcRequest("eth_blockNumber", []))).toString(10);
+
 const forgeCreate = async (options: {
-  readonly cwd: string; readonly contractPath: string; readonly contractName: string;
-  readonly constructorArgs?: readonly string[];
+  readonly cwd: string; readonly contractPath: string; readonly contractName: string; readonly constructorArgs?: readonly string[];
 }): Promise<Deployed> => {
-  const args = [
-    "forge", "create", `${options.contractPath}:${options.contractName}`,
-    "--rpc-url", rpcUrl, "--private-key", DEPLOYER_KEY, "--broadcast",
-  ];
-  if (options.constructorArgs !== undefined && options.constructorArgs.length > 0) {
-    args.push("--constructor-args", ...options.constructorArgs);
-  }
+  const args = ["forge", "create", `${options.contractPath}:${options.contractName}`, "--rpc-url", rpcUrl, "--private-key", DEPLOYER_KEY, "--broadcast"];
+  if (options.constructorArgs !== undefined && options.constructorArgs.length > 0) args.push("--constructor-args", ...options.constructorArgs);
   const stdout = await run(args, options.cwd);
-  const address = /Deployed to: (0x[0-9a-fA-F]{40})/u.exec(stdout)?.[1];
-  const transactionHash = /Transaction hash: (0x[0-9a-fA-F]{64})/u.exec(stdout)?.[1];
-  if (address === undefined || transactionHash === undefined) {
-    throw new Error(`Could not parse forge create output for ${options.contractName}:\n${stdout.trim().slice(-2_000)}`);
-  }
-  log(`deployed ${options.contractName}`, { address, transactionHash });
-  return { address, transactionHash };
+  const address = addressSchema.parse(/Deployed to: (0x[0-9a-fA-F]{40})/u.exec(stdout)?.[1]);
+  const transactionHash = hashSchema.parse(/Transaction hash: (0x[0-9a-fA-F]{64})/u.exec(stdout)?.[1]);
+  const deployed = { address, transactionHash, blockNumber: await receiptBlock(transactionHash), installation: "create" as const };
+  log(`deployed ${options.contractName}`, deployed);
+  return deployed;
 };
 
-if (await alreadyDeployed()) {
-  log("reusing existing local chain deployment", { addresses: addressesPath });
+const castSend = async (to: string, signatureOrData: string, args: readonly string[] = [], privateKey = DEPLOYER_KEY): Promise<string> => {
+  const output = await run(["cast", "send", to, signatureOrData, ...args, "--rpc-url", rpcUrl, "--private-key", privateKey, "--json"], aquaRoot);
+  return z.object({ transactionHash: hashSchema }).loose().parse(JSON.parse(output)).transactionHash;
+};
+
+const castCall = async (to: string, signature: string, args: readonly string[] = []): Promise<string> =>
+  (await run(["cast", "call", to, signature, ...args, "--rpc-url", rpcUrl], aquaRoot)).trim();
+const sameAddress = (actual: string, expected: string): boolean => actual.toLowerCase() === expected.toLowerCase();
+const assertDeploymentBindings = async (contracts: z.infer<typeof contractsSchema>, tokens: readonly Deployed[]): Promise<void> => {
+  for (const router of [contracts.aquaSwapRouter.address, contracts.limitSwapRouter.address]) {
+    if (!sameAddress(await castCall(router, "AQUA()(address)"), contracts.aqua.address)) throw new Error(`Router ${router} has the wrong Aqua binding`);
+    if (!sameAddress(await castCall(router, "WETH()(address)"), contracts.wrappedNativeToken.address)) throw new Error(`Router ${router} has the wrong WETH binding`);
+  }
+  if (!sameAddress(await castCall(contracts.intentController.address, "operator()(address)"), identity.keeper)) throw new Error("Intent controller operator does not match broker keeper");
+  if (!sameAddress(await castCall(contracts.boundedMatcher.address, "operator()(address)"), identity.keeper)) throw new Error("Bounded matcher operator does not match broker keeper");
+  for (const router of [contracts.aquaSwapRouter.address, contracts.limitSwapRouter.address]) {
+    if (await castCall(contracts.boundedMatcher.address, "allowed(address,bytes4)(bool)", [router, SWAP_SELECTOR]) !== "true") throw new Error(`Bounded matcher does not allow swap on ${router}`);
+  }
+  if (!sameAddress(await castCall(contracts.x402ExactPermit2Proxy.address, "PERMIT2()(address)"), PERMIT2_ADDRESS)) throw new Error("x402 exact proxy is not bound to canonical Permit2");
+  const expectedTokens = [
+    { symbol: "aUSD", decimals: "6", supply: "1000000000000" },
+    { symbol: "aETH", decimals: "18", supply: "1000000000000000000000" },
+  ];
+  for (const [index, expected] of expectedTokens.entries()) {
+    const token = tokens[index];
+    if (token === undefined) throw new Error("Both fixture tokens must be deployed");
+    const [symbol, decimals, supply] = await Promise.all([
+      castCall(token.address, "symbol()(string)"), castCall(token.address, "decimals()(uint8)"), castCall(token.address, "totalSupply()(uint256)"),
+    ]);
+    if (symbol.replace(/^"|"$/gu, "") !== expected.symbol || decimals !== expected.decimals
+      || supply.split(" ")[0] !== expected.supply) throw new Error(`Fixture token ${token.address} metadata or supply is invalid`);
+  }
+};
+
+const validateRecordedDeployment = async (): Promise<boolean> => {
+  if (!existsSync(deploymentsPath) || !existsSync(addressesPath)) return false;
+  try {
+    const evidence = evidenceSchema.parse(await Bun.file(deploymentsPath).json());
+    if (evidence.contracts.permit2.address !== PERMIT2_ADDRESS || evidence.contracts.x402ExactPermit2Proxy.address !== X402_EXACT_PROXY_ADDRESS) return false;
+    const all = [...Object.values(evidence.contracts), ...evidence.tokens];
+    if (!(await Promise.all(all.map(async ({ address }) => (await rpc.getCode(address)) !== "0x"))).every(Boolean)) return false;
+    for (const transactionHash of evidence.seedTransactions) {
+      z.object({ status: z.literal("0x1") }).loose().parse(await rpcRequest("eth_getTransactionReceipt", [transactionHash]));
+    }
+    if (existsSync(manifestPath)) {
+      const manifest = runtimeManifestSchema.parse(await Bun.file(manifestPath).json());
+      for (const name of contractNames) {
+        const deployment = evidence.contracts[name];
+        const recorded = manifest.contracts[name];
+        const codeHash = keccakHex(hexToBytes(await rpc.getCode(deployment.address)));
+        if (recorded.address !== deployment.address || recorded.runtimeCodeHash !== codeHash) return false;
+      }
+      for (const [index, deployment] of evidence.tokens.entries()) {
+        const recorded = manifest.fixtures.tokens[index];
+        if (recorded?.address !== deployment.address) return false;
+        if (recorded.runtimeCodeHash !== keccakHex(hexToBytes(await rpc.getCode(deployment.address)))) return false;
+      }
+    }
+    await assertDeploymentBindings(evidence.contracts, evidence.tokens);
+    return true;
+  } catch (error) {
+    log("recorded deployment is incomplete or stale; redeploying", { reason: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+};
+
+if (await validateRecordedDeployment()) {
+  log("reusing fully validated local chain deployment", { addresses: addressesPath });
   process.exit(0);
 }
+if (await rpc.chainId() !== 31_337) throw new Error("Local deployment is restricted to Anvil chain 31337");
 
-// Permit2 -- deployed via a direct CREATE (not the packaged CREATE2 salt script) so its receipt
-// carries a non-null contractAddress: generate-local-manifest.ts verifies each deployment by
-// reading `receipt.contractAddress`, which is only ever populated for a transaction whose `to`
-// field is empty (a direct contract-creation transaction). A CREATE2 deployment made through the
-// canonical deterministic deployer instead targets that deployer contract, so its own top-level
-// receipt has contractAddress=null even though the target contract really was created.
 const permit2Dir = `${buildDir}/permit2`;
 await prepareCopy(upstream.permit2, permit2Dir);
-const permit2 = await forgeCreate({ cwd: permit2Dir, contractPath: "src/Permit2.sol", contractName: "Permit2" });
+// Use the exact precompiled runtime shipped by Permit2's own Anvil test helper. Compiling the
+// contract again is not equivalent because its EIP-712 cache contains constructor-patched immutables.
+const permit2Helper = await Bun.file(`${permit2Dir}/test/utils/DeployPermit2.sol`).text();
+const permit2Runtime = `0x${/bytes memory bytecode\s*=\s*hex"([0-9a-fA-F]+)"/u.exec(permit2Helper)?.[1] ?? ""}`;
+if (!/^0x[0-9a-fA-F]+$/u.test(permit2Runtime)) throw new Error("Permit2 forge inspect returned invalid runtime bytecode");
+await rpcRequest("anvil_setCode", [PERMIT2_ADDRESS, permit2Runtime]);
+const permit2: Deployed = { address: PERMIT2_ADDRESS, blockNumber: await currentBlock(), installation: "anvil-set-code" };
+if (await rpc.getCode(PERMIT2_ADDRESS) === "0x") throw new Error("Failed to install canonical Permit2 runtime code");
 
 const aquaDir = `${buildDir}/aqua`;
 await prepareCopy(upstream.aqua, aquaDir);
-await bunInstall(aquaDir);
-const aqua = await forgeCreate({
-  cwd: aquaDir, contractPath: "src/AquaRouter.sol", contractName: "AquaRouter",
-  constructorArgs: [DEPLOYER_ADDRESS],
-});
+await run(["bun", "install"], aquaDir);
+const aqua = await forgeCreate({ cwd: aquaDir, contractPath: "src/AquaRouter.sol", contractName: "AquaRouter", constructorArgs: [DEPLOYER_ADDRESS] });
 
-// WETH9 + two fixture ERC-20 tokens live in this repo (ops/local-fixtures), not upstream, since
-// no upstream input ships a wrapped-native-token or mintable test token.
 const fixturesDir = `${aquaRoot}/ops/local-fixtures`;
 const weth = await forgeCreate({ cwd: fixturesDir, contractPath: "src/WETH9.sol", contractName: "WETH9" });
-const tokenA = await forgeCreate({
-  cwd: fixturesDir, contractPath: "src/FixtureERC20.sol", contractName: "FixtureERC20",
-  constructorArgs: ["Aqua Fixture USD", "aUSD", "6", DEPLOYER_ADDRESS, "1000000000000"],
-});
-const tokenB = await forgeCreate({
-  cwd: fixturesDir, contractPath: "src/FixtureERC20.sol", contractName: "FixtureERC20",
-  constructorArgs: ["Aqua Fixture ETH", "aETH", "18", DEPLOYER_ADDRESS, "1000000000000000000000"],
-});
+const tokenA = await forgeCreate({ cwd: fixturesDir, contractPath: "src/FixtureERC20.sol", contractName: "FixtureERC20", constructorArgs: ["Aqua Fixture USD", "aUSD", "6", DEPLOYER_ADDRESS, "1000000000000"] });
+const tokenB = await forgeCreate({ cwd: fixturesDir, contractPath: "src/FixtureERC20.sol", contractName: "FixtureERC20", constructorArgs: ["Aqua Fixture ETH", "aETH", "18", DEPLOYER_ADDRESS, "1000000000000000000000"] });
 
 const swapvmDir = `${buildDir}/swapvm`;
 await prepareCopy(upstream.swapvm, swapvmDir);
-await bunInstall(swapvmDir);
+await run(["bun", "install"], swapvmDir);
 const swapVmConstructorArgs = [aqua.address, weth.address, DEPLOYER_ADDRESS, "SwapVMRouter", "1.0.0"];
-const aquaSwapRouter = await forgeCreate({
-  cwd: swapvmDir, contractPath: "src/routers/AquaSwapVMRouter.sol", contractName: "AquaSwapVMRouter",
-  constructorArgs: swapVmConstructorArgs,
-});
-const limitSwapRouter = await forgeCreate({
-  cwd: swapvmDir, contractPath: "src/routers/LimitSwapVMRouter.sol", contractName: "LimitSwapVMRouter",
-  constructorArgs: swapVmConstructorArgs,
-});
+const aquaSwapRouter = await forgeCreate({ cwd: swapvmDir, contractPath: "src/routers/AquaSwapVMRouter.sol", contractName: "AquaSwapVMRouter", constructorArgs: swapVmConstructorArgs });
+const limitSwapRouter = await forgeCreate({ cwd: swapvmDir, contractPath: "src/routers/LimitSwapVMRouter.sol", contractName: "LimitSwapVMRouter", constructorArgs: swapVmConstructorArgs });
 
 const x402Dir = `${buildDir}/x402-evm`;
 await prepareCopy(`${upstream.x402}/contracts/evm`, x402Dir);
-const x402ExactPermit2Proxy = await forgeCreate({
-  cwd: x402Dir, contractPath: "src/x402ExactPermit2Proxy.sol", contractName: "x402ExactPermit2Proxy",
-  constructorArgs: [permit2.address],
+if (await rpc.getCode(CREATE2_DEPLOYER) === "0x") throw new Error(`Canonical CREATE2 deployer is missing at ${CREATE2_DEPLOYER}`);
+const x402InitCode = (await Bun.file(`${x402Dir}/script/data/exact-proxy-initcode.hex`).text()).trim();
+if (!/^0x[0-9a-fA-F]+$/u.test(x402InitCode)) throw new Error("Pinned x402 init code is invalid");
+let x402TransactionHash: string | undefined;
+if (await rpc.getCode(X402_EXACT_PROXY_ADDRESS) === "0x") x402TransactionHash = await castSend(CREATE2_DEPLOYER, `${X402_EXACT_SALT}${x402InitCode.slice(2)}`);
+if (await rpc.getCode(X402_EXACT_PROXY_ADDRESS) === "0x") throw new Error(`x402 exact proxy did not deploy at canonical address ${X402_EXACT_PROXY_ADDRESS}`);
+const x402ExactPermit2Proxy: Deployed = {
+  address: X402_EXACT_PROXY_ADDRESS, ...(x402TransactionHash === undefined ? {} : { transactionHash: x402TransactionHash }),
+  blockNumber: x402TransactionHash === undefined ? await currentBlock() : await receiptBlock(x402TransactionHash), installation: "create2",
+};
+
+const contractsDir = `${aquaRoot}/contracts`;
+const intentController = await forgeCreate({ cwd: contractsDir, contractPath: "src/AquaIntentController.sol", contractName: "AquaIntentController", constructorArgs: [identity.keeper, "1", "1"] });
+const orderVaultFactory = await forgeCreate({ cwd: contractsDir, contractPath: "src/AquaOrderVaultFactory.sol", contractName: "AquaOrderVaultFactory" });
+const boundedMatcher = await forgeCreate({
+  cwd: contractsDir, contractPath: "src/BoundedMatcher.sol", contractName: "BoundedMatcher",
+  constructorArgs: [identity.keeper, `[${aquaSwapRouter.address},${limitSwapRouter.address}]`, `[${SWAP_SELECTOR},${SWAP_SELECTOR}]`],
 });
 
-// The Ledger-vault wrapper contracts already live in, and are built by, this repo's own
-// contracts/ Foundry project (deny="warnings"-clean); deploy straight from there rather than
-// copying it, since it is always writable already.
-const contractsDir = `${aquaRoot}/contracts`;
-const intentController = await forgeCreate({
-  cwd: contractsDir, contractPath: "src/AquaIntentController.sol", contractName: "AquaIntentController",
-  // operator must be the secret-broker's real keeper address: it is the only account that will
-  // ever be asked to sign observe()/activate() calls once the order-worker is running.
-  constructorArgs: [identity.keeper, "1", "1"],
-});
-const orderVaultFactory = await forgeCreate({
-  cwd: contractsDir, contractPath: "src/AquaOrderVaultFactory.sol", contractName: "AquaOrderVaultFactory",
-});
+const contracts = { aqua, aquaSwapRouter, limitSwapRouter, wrappedNativeToken: weth, intentController, orderVaultFactory, boundedMatcher, permit2, x402ExactPermit2Proxy };
+const verifiedContracts = contractsSchema.parse(contracts);
+await assertDeploymentBindings(verifiedContracts, [tokenA, tokenB]);
+const seedTransactions: string[] = [];
+for (const brokerAddress of [identity.agent, identity.facilitator, identity.keeper, FIXTURE_MAKER]) {
+  await rpcRequest("anvil_setBalance", [brokerAddress, "0x8ac7230489e80000"]); // 10 ETH
+  seedTransactions.push(await castSend(tokenA.address, "transfer(address,uint256)", [brokerAddress, "10000000000"]));
+  seedTransactions.push(await castSend(tokenB.address, "transfer(address,uint256)", [brokerAddress, "10000000000000000000"]));
+}
+
+const protocol = new ProtocolService({
+  chainId: 31_337, aqua: verifiedContracts.aqua.address, aquaSwapRouter: verifiedContracts.aquaSwapRouter.address,
+  limitSwapRouter: verifiedContracts.limitSwapRouter.address, wrappedNativeToken: verifiedContracts.wrappedNativeToken.address,
+}, rpc, () => new Date("2026-09-08T00:00:00.000Z"));
+const principal = { address: FIXTURE_MAKER, scopes: new Set(["trading:read" as const, "trading:write" as const]), sessionId: "local-anvil-fixture" };
+const fixtureOrders = [
+  { sellToken: tokenA.address, buyToken: tokenB.address, sellAmount: "1000", buyAmount: "1", salt: `0x${"a1".repeat(32)}` },
+  { sellToken: tokenB.address, buyToken: tokenA.address, sellAmount: "1", buyAmount: "1000", salt: `0x${"b2".repeat(32)}` },
+] as const;
+const seedOrders: { readonly orderHash: string; readonly transactionHash: string }[] = [];
+for (const fixture of fixtureOrders) {
+  const prepared = await protocol.prepareLimit(limitOrderRequestSchema.parse({
+    ...fixture, timeInForce: "GTC", fillPolicy: "partial",
+  }), principal);
+  if (prepared.approval !== undefined) seedTransactions.push(await castSend(prepared.approval.to, prepared.approval.data, [], FIXTURE_MAKER_KEY));
+  const transactionHash = await castSend(prepared.shipTransaction.to, prepared.shipTransaction.data, [], FIXTURE_MAKER_KEY);
+  seedTransactions.push(transactionHash);
+  seedOrders.push({ orderHash: prepared.orderHash, transactionHash });
+}
 
 const deployments = {
-  transactions: {
-    aqua: aqua.transactionHash,
-    aquaSwapRouter: aquaSwapRouter.transactionHash,
-    limitSwapRouter: limitSwapRouter.transactionHash,
-    wrappedNativeToken: weth.transactionHash,
-    intentController: intentController.transactionHash,
-    orderVaultFactory: orderVaultFactory.transactionHash,
-    permit2: permit2.transactionHash,
-    x402ExactPermit2Proxy: x402ExactPermit2Proxy.transactionHash,
-  },
-  tokenTransactions: [tokenA.transactionHash, tokenB.transactionHash],
-  pasetoPublicKeys: [identity.pasetoPublicKey],
-  brokerSocket: env("AQUA_BROKER_SOCKET"),
-  databaseUrl: env("DATABASE_URL"),
-  apiPort: Number(env("AQUA_API_PORT")),
-  facilitatorPort: Number(env("AQUA_FACILITATOR_PORT")),
+  contracts, tokens: [tokenA, tokenB], seedTransactions, seedOrders, pasetoPublicKeys: [identity.pasetoPublicKey],
+  keeperAddress: identity.keeper,
+  brokerSocket: env("AQUA_BROKER_SOCKET"), databaseUrl: env("DATABASE_URL"),
+  apiPort: Number(env("AQUA_API_PORT")), facilitatorPort: Number(env("AQUA_FACILITATOR_PORT")),
 };
 await Bun.write(deploymentsPath, `${JSON.stringify(deployments, null, 2)}\n`);
-
 const addresses = {
-  aqua: aqua.address, aquaSwapRouter: aquaSwapRouter.address, limitSwapRouter: limitSwapRouter.address,
-  wrappedNativeToken: weth.address, intentController: intentController.address,
-  orderVaultFactory: orderVaultFactory.address, permit2: permit2.address,
-  x402ExactPermit2Proxy: x402ExactPermit2Proxy.address, tokenA: tokenA.address, tokenB: tokenB.address,
+  ...Object.fromEntries(Object.entries(contracts).map(([name, deployment]) => [name, deployment.address])),
+  tokenA: tokenA.address, tokenB: tokenB.address,
 };
 await Bun.write(addressesPath, `${JSON.stringify(addresses, null, 2)}\n`);
-hashSchema.parse(deployments.transactions.aqua); // Fails fast and loudly if forge output was ever mis-parsed above.
-log("local chain deployment complete", addresses);
+log("local chain deployment and deterministic two-way liquidity complete", { ...addresses, seedTransactions, seedOrders });

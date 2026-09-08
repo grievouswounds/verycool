@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { PostgresKeeperJobRepository, PostgresTradingRepository, createDatabase, closeDatabase } from "@aqua/adapters";
 import { hexSchema, loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
 import { JsonRpcClient, initializeCubane } from "@aqua/evm";
@@ -7,6 +8,7 @@ import { Keeper, OrderBookIndexer, TriggerEvaluator } from "@aqua/orderbook";
 import { SecretBrokerClient } from "@aqua/security";
 
 const manifest=await loadRuntimeManifest(Bun.argv);const defaults=localProfileDefaults;
+const readyIndex=Bun.argv.indexOf("--ready-out");const readyOut=readyIndex<0?null:Bun.argv[readyIndex+1]??null;
 initializeCubane();const database=createDatabase(manifest.services.databaseUrl);await database.connect();
 const repository=new PostgresTradingRepository(database);await repository.initialize();
 const rpc=new JsonRpcClient(new URL(manifest.chain.rpcUrl),defaults.rpcTimeoutMs);
@@ -19,4 +21,4 @@ const triggers=new TriggerEvaluator(repository,keeperRepository,{controller:mani
 console.log(JSON.stringify({level:"info",component:"order-worker",manifestHash:runtimeManifestHash(manifest)}));
 const workerId=randomUUID();const runCycle=async():Promise<void>=>{await indexer.runOnce();const head=await rpc.blockNumber();if(head>=BigInt(manifest.indexer.confirmations)){const confirmed=await rpc.block(head-BigInt(manifest.indexer.confirmations));await triggers.runOnce(confirmed.number,confirmed.timestamp);}await keeper.runOnce(workerId);};
 let stopped=false;let timer:ReturnType<typeof setTimeout>|undefined;const schedule=():void=>{if(stopped)return;timer=setTimeout(()=>{void runCycle().catch((error:unknown)=>{console.error(JSON.stringify({level:"error",component:"order-worker",message:error instanceof Error?error.message:"Unknown worker error"}));}).finally(schedule);},defaults.orderbookPollIntervalSeconds*1_000);};
-await runCycle();schedule();const shutdown=async():Promise<void>=>{stopped=true;if(timer!==undefined)clearTimeout(timer);await closeDatabase(database);};process.once("SIGTERM",()=>{void shutdown();});process.once("SIGINT",()=>{void shutdown();});
+await runCycle();if(readyOut!==null)await Bun.write(readyOut,"ready\n");schedule();const shutdown=async():Promise<void>=>{stopped=true;if(timer!==undefined)clearTimeout(timer);if(readyOut!==null)await rm(readyOut,{force:true});await closeDatabase(database);};process.once("SIGTERM",()=>{void shutdown();});process.once("SIGINT",()=>{void shutdown();});

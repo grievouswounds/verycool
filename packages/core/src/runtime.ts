@@ -37,7 +37,8 @@ export const runtimeManifestSchema = z.object({
   contracts: z.object({
     aqua: contractSchema, aquaSwapRouter: contractSchema, limitSwapRouter: contractSchema,
     wrappedNativeToken: contractSchema, intentController: contractSchema,
-    orderVaultFactory: contractSchema, permit2: contractSchema, x402ExactPermit2Proxy: contractSchema,
+    orderVaultFactory: contractSchema, boundedMatcher: contractSchema,
+    permit2: contractSchema, x402ExactPermit2Proxy: contractSchema,
   }).strict(),
   fixtures: z.object({
     tokens: z.array(tokenSchema).min(2),

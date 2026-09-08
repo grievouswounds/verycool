@@ -3,18 +3,61 @@ set -euo pipefail
 
 state_dir="${AQUA_STATE_DIR:-$PWD/.data}"
 ring_dir="$state_dir/keyring"
-mkdir -p "$ring_dir"
-chmod 700 "$ring_dir"
+required_keys=(agent facilitator keeper paseto)
+present=0
+for key_name in "${required_keys[@]}"; do
+  [[ -f "$ring_dir/$key_name.enc" ]] && present=$((present + 1))
+done
+if [[ "$present" -eq "${#required_keys[@]}" ]]; then
+  echo "Ledger keyring already exists in $ring_dir"
+  exit 0
+fi
+if [[ "$present" -ne 0 || -e "$ring_dir" ]]; then
+  echo "Incomplete Ledger keyring at $ring_dir; move it aside or restore all four encrypted keys before retrying" >&2
+  exit 1
+fi
+if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
+  echo "physical Ledger bootstrap requires aarch64-darwin" >&2
+  exit 1
+fi
+if pgrep -x "Ledger Live" >/dev/null; then
+  echo "quit Ledger Live before using the Ledger HID device" >&2
+  exit 1
+fi
 
-wallet_pass="$(security find-generic-password -w -s aqua-ledger-wallet-pass)"
+mkdir -p "$state_dir"
+staging="$(mktemp -d "$state_dir/.keyring.XXXXXX")"
+chmod 700 "$staging"
+cleanup() { [[ -z "${staging:-}" ]] || rm -rf "$staging"; unset WALLET_PASS wallet_pass first_pass second_pass; }
+trap cleanup EXIT
+
+if wallet_pass="$(security find-generic-password -w -s aqua-ledger-wallet-pass 2>/dev/null)"; then
+  :
+else
+  read -r -s -p "Create Ledger Key Ring password: " first_pass
+  printf '\n'
+  read -r -s -p "Confirm Ledger Key Ring password: " second_pass
+  printf '\n'
+  if [[ -z "$first_pass" || "$first_pass" != "$second_pass" ]]; then
+    echo "Ledger Key Ring passwords are empty or do not match" >&2
+    exit 1
+  fi
+  wallet_pass="$first_pass"
+  security add-generic-password -U -a "${USER:-aqua}" -s aqua-ledger-wallet-pass -w "$wallet_pass" >/dev/null
+fi
 export WALLET_PASS="$wallet_pass"
-trap 'unset WALLET_PASS wallet_pass' EXIT
 
 wallet-cli genuine-check --output json
 wallet-cli account discover --currency ethereum --output json
-wallet-cli ring init
-for key_name in agent facilitator keeper paseto; do
+wallet-cli ring init --output json
+for key_name in agent facilitator keeper; do
   umask 077
-  openssl rand -hex 32 | wallet-cli ring encrypt --key "$key_name" -o "$ring_dir/$key_name.enc"
+  openssl rand -hex 32 | wallet-cli ring encrypt --key "$key_name" -o "$staging/$key_name.enc" --output json
 done
+umask 077
+bun -e 'import { generateKeys } from "paseto-ts/v4"; process.stdout.write(generateKeys("public").secretKey)' \
+  | wallet-cli ring encrypt --key paseto -o "$staging/paseto.enc" --output json
+chmod 600 "$staging"/*.enc
+mv "$staging" "$ring_dir"
+staging=""
 echo "Encrypted broker keys created in $ring_dir"

@@ -26,22 +26,19 @@ It also monitors confirmed ERC-20 transfers for addresses selected by authentica
 Prerequisites are Nix with flakes enabled. The development shell provides Bun, Aube, PostgreSQL, Foundry/Anvil, Turbo, Process Compose, and Nix formatting tools; no local Docker, Bun, or Aube installation is required.
 
 ```sh
-cp .env.example .env
-nix develop
-# PostgreSQL is ready; run one process while developing:
-aube run dev
-# Or run the complete stack:
 nix develop -c dev
 ```
 
-The API listens on `http://localhost:3000` by default. Open Swagger at `http://localhost:3000/docs`, fetch the specification from `/openapi.json`, or inspect `/v1/capabilities` from an agent.
+On the first run, connect an unlocked Ledger with its Ethereum app open and quit Ledger Live. The launcher verifies the device, prompts twice for a new local keyring password when the `aqua-ledger-wallet-pass` Keychain item is absent, and atomically creates four encrypted keys in `.data/keyring`. It then starts PostgreSQL and Anvil, deploys and verifies every protocol contract, seeds deterministic two-way fixture liquidity, and starts the API and both workers. The API listens on `http://localhost:8787`; open Swagger at `http://localhost:8787/docs` or check readiness at `http://localhost:8787/health/ready`.
+
+Both `nix develop -c dev` and `nix run .#dev` use API hot reload. Use `aube run start` or `nix run .#start` for the same complete stack without hot reload. Run `ledger-bootstrap` inside the development shell for explicit device diagnostics or recovery.
 
 ## Toolchain
 
-- `nix develop` installs dependencies with Aube, starts local PostgreSQL when needed, creates the `aqua` role/database, and applies migrations. Change dependencies only with Aube (`aube add`, `aube remove`); the lockfile is authoritative and produced by Aube 1.17.
+- `nix develop` installs dependencies with Aube and exposes the complete toolchain without leaving background processes behind. The `dev`/`start` supervisor owns PostgreSQL initialization and migrations. Change dependencies only with Aube (`aube add`, `aube remove`); the lockfile is authoritative and produced by Aube 1.17.
 - Run `aube run check` for strict TypeScript, 100% type coverage, zero-`any` AST inspection, ESLint, tests, dependency policy, and the production bundle.
 - Run `aube run codegen:check` to verify the committed Cubane selector manifest.
-- Enter the reproducible shell with `nix develop`. PostgreSQL is ready immediately; use `aube run dev` for the API alone or `dev`/`nix develop -c dev` for the full supervisor.
+- Enter the reproducible shell with `nix develop`. `aube run dev`, `dev`, and `nix develop -c dev` all launch the complete hot-reload stack; `aube run start` launches its non-hot equivalent.
 
 ### Command reference
 
@@ -57,12 +54,12 @@ aube remove -W package             # remove a root dependency
 Development and production:
 
 ```sh
-aube run dev                       # hot-reload the API
-aube run start                     # run the API without hot reload
+aube run dev                       # complete local stack, API hot reload
+aube run start                     # complete local stack, no hot reload
 bun apps/worker/src/main.ts        # run the minute activity worker locally
 bun apps/order-worker/src/main.ts  # run the confirmed order-book indexer locally
 aube run build                     # build every Turbo workspace package
-dev                                # run PostgreSQL, migrations, API, and both workers together
+dev                                # same complete hot-reload stack
 ```
 
 Quality and tests:
@@ -89,6 +86,8 @@ nix flake check                    # evaluate and build checks for this system
 nix develop                         # enter the complete native toolchain
 nix develop -c dev                 # start the native development stack
 nix run .#dev                      # start the same stack without entering a shell
+nix run .#start                    # start the complete non-hot stack
+nix run .#api -- --config /absolute/path/runtime-manifest.json # API only
 nix build .#api                    # build the API launcher
 nix build .#worker                 # build the activity-worker launcher
 nix build .#order-worker           # build the order-book-worker launcher
@@ -176,7 +175,9 @@ Rotate access-token keys by deploying the new public key to every verifier first
 
 `ACTIVITY_CONFIRMATIONS` is required and must be chosen for the configured chain. Collection defaults to a 60-second interval, 1,000-block chunks, four concurrent subscriptions, a 120-second lease, and 100 active subscriptions per authenticated wallet. The worker and API must use the same RPC, PostgreSQL database, chain, and confirmation configuration.
 
-`dev` starts local PostgreSQL at `127.0.0.1:5432`, applies migrations, and then starts the API and both workers. Its data persists in the gitignored `.data/postgresql` directory. Configure `DATABASE_URL`, `RPC_URL`, and the contract addresses for the chain you intend to use.
+`dev` and `start` persist PostgreSQL, Anvil state, deployment evidence, encrypted keys, and the verified runtime manifest under the gitignored `.data` directory. The local chain is fixed to chain ID 31337. Its manifest contains Aqua, both SwapVM routers, WETH9, the intent controller, vault factory, BoundedMatcher, canonical Permit2, canonical x402 exact proxy, and two differently-decimalled fixture tokens. Startup blocks the API until code hashes, constructor bindings, operators, matcher permissions, fixture metadata/supply, seed receipts, and canonical addresses all verify.
+
+The deployment is reused only when the entire recorded set and both deterministic seeded orders remain valid. Missing code, stale runtime hashes, wrong bindings, or incomplete evidence cause a complete redeployment and regenerated manifest. An incomplete `.data/keyring` is never overwritten: move it aside for forensic recovery or restore all four `agent.enc`, `facilitator.enc`, `keeper.enc`, and `paseto.enc` files, then run `ledger-bootstrap` again. For API-only operation, bypass the local supervisor explicitly with `nix run .#api -- --config <runtime-manifest.json>`.
 
 Set `ONEINCH_API_KEY` to enable the authenticated price endpoints. `ONEINCH_BASE_URL` defaults to `https://api.1inch.com` and `ONEINCH_DEFAULT_CURRENCY` defaults to `USD`. These settings do not affect Aqua quote/trade readiness; local Anvil chains are normally unsupported by the external price provider.
 
@@ -184,13 +185,7 @@ Set `ONEINCH_API_KEY` to enable the authenticated price endpoints. `ONEINCH_BASE
 
 Market execution walks price-time-compatible liquidity in best-price order and is bounded to eight Aqua orders. FOK requires sufficient full-depth liquidity; IOC reports any unfilled human-decimal amount. Post-only and book-or-cancel reject crossing placement. Ticker, recent trades, candles, balances, Aqua virtual allocations, and open-order commitments are computed from the same confirmed projection.
 
-The keeper key is read only from `KEEPER_PRIVATE_KEY_FILE`; it is never accepted in an environment variable, image, API request, or log. Create the external Compose secret before `dev-up`:
-
-```sh
-printf '%s' '0x…32-byte-development-key…' | docker secret create keeper-key -
-```
-
-Use a dedicated gas-only account. `KEEPER_ALLOWED_TARGETS` and `KEEPER_ALLOWED_SELECTORS` are mandatory bounded JSON allowlists. The worker serializes nonces through leased PostgreSQL jobs, signs EIP-1559 transactions with Cubane, enforces gas and fee ceilings, applies a 12.5% replacement bump, follows receipts, and records terminal reverts. Trigger observations require both configured block and wall-clock persistence; a false or changed full-depth proof resets the window.
+Keeper signing is isolated in the local Unix-socket secret broker. Its encrypted key is decrypted by `wallet-cli` and never enters an environment variable, image, API request, or log. The generated manifest restricts it to the intent controller’s `observe`/`activate`, vault-factory lifecycle `execute`, and BoundedMatcher batch `execute`; the matcher separately permits only `swap` on the two deployed routers. The worker serializes nonces through leased PostgreSQL jobs, enforces gas and fee ceilings, follows receipts, and records terminal reverts.
 
 The contracts in [`contracts/`](contracts/) are security-sensitive reference implementations, not an audit. `AquaIntentController` provides EIP-712 nonce consumption and block-plus-time trigger persistence; `BoundedMatcher` caps execution at eight allowlisted target-selector calls. Production use requires an independent audit and reviewed router/program allowlists. Arbitrary Aqua programs are excluded because SwapVM instruction ordering is security-critical.
 

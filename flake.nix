@@ -76,10 +76,14 @@
         pkgs.writeShellApplication {
           inherit name;
           runtimeInputs = [ pkgs.bun ];
-          text = ''exec bun "$PWD/${source}" "$@"'';
+          text = ''
+            export LANG=C.UTF-8
+            export LC_ALL=C.UTF-8
+            exec bun "$PWD/${source}" "$@"
+          '';
         };
       devStack =
-        pkgs: aube: aqua: swapvm: x402: permit2:
+        pkgs: aube: aqua: swapvm: x402: permit2: commandName: hotReload:
         let
           processComposeConfig = pkgs.writeText "aqua-process-compose.yaml" ''
             version: "0.5"
@@ -87,21 +91,16 @@
 
             processes:
               postgresql:
-                # The devShell shellHook already starts a persistent PostgreSQL for
-                # interactive use before "dev" gets a chance to run, so "nix develop -c dev"
-                # (and plain "dev" typed inside "nix develop") reach this with a server
-                # already listening on 5432. Starting a second postgres against the same
-                # data directory fails immediately (lock file postmaster.pid already
-                # exists), which was breaking "nix develop -c dev" entirely. Reuse the
-                # running server when there is one; "nix run .#dev", which bypasses the
-                # shellHook, still starts its own via the else branch.
+                # Reuse an explicitly user-managed server already listening on the configured
+                # local port; otherwise Process Compose owns PostgreSQL and shuts it down with
+                # the rest of the stack. The devShell itself never starts background services.
                 command: >-
-                  pg_isready -h 127.0.0.1 -p 5432 -d aqua_backend >/dev/null 2>&1 &&
+                  pg_isready -h 127.0.0.1 -p 5432 -d postgres >/dev/null 2>&1 &&
                   exec tail -f /dev/null ||
                   exec postgres -D "$${AQUA_STATE_DIR}/postgresql"
                 readiness_probe:
                   exec:
-                    command: pg_isready -h 127.0.0.1 -p 5432 -d aqua_backend
+                    command: pg_isready -h 127.0.0.1 -p 5432 -d postgres
                   initial_delay_seconds: 1
                   period_seconds: 1
                   timeout_seconds: 2
@@ -135,9 +134,8 @@
                   failure_threshold: 30
 
               secret-broker:
-                # Real, Ledger-backed mode only: "ledger-bootstrap" (run manually, once, with a
-                # physical Ledger connected) must already have produced an encrypted keyring at
-                # "$AQUA_STATE_DIR/keyring" before this can start. "--config" is only read lazily
+                # Real, Ledger-backed mode only: the launcher runs ledger-bootstrap before the
+                # supervisor, producing or validating the encrypted keyring. "--config" is read lazily
                 # on the broker's first real signing request, so it is safe to point at a
                 # manifest that "manifest-generate" below has not written yet.
                 command: >-
@@ -182,7 +180,7 @@
 
               api:
                 command: >-
-                  bun --hot "$${AQUA_ROOT}/apps/api/src/main.ts"
+                  ${if hotReload then "bun --hot" else "bun"} "$${AQUA_ROOT}/apps/api/src/main.ts"
                   --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
                 depends_on:
                   postgres-init:
@@ -192,11 +190,20 @@
                 availability:
                   restart: on_failure
                   backoff_seconds: 2
+                readiness_probe:
+                  exec:
+                    command: curl --fail --silent "http://127.0.0.1:$${AQUA_API_PORT}/health/ready" >/dev/null
+                  initial_delay_seconds: 1
+                  period_seconds: 2
+                  timeout_seconds: 2
+                  success_threshold: 1
+                  failure_threshold: 30
 
               activity-worker:
                 command: >-
                   bun "$${AQUA_ROOT}/apps/worker/src/main.ts"
                   --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
+                  --ready-out "$${AQUA_STATE_DIR}/activity-worker.ready"
                 depends_on:
                   postgres-init:
                     condition: process_completed_successfully
@@ -205,11 +212,20 @@
                 availability:
                   restart: on_failure
                   backoff_seconds: 2
+                readiness_probe:
+                  exec:
+                    command: test -f "$${AQUA_STATE_DIR}/activity-worker.ready"
+                  initial_delay_seconds: 1
+                  period_seconds: 1
+                  timeout_seconds: 2
+                  success_threshold: 1
+                  failure_threshold: 30
 
               order-worker:
                 command: >-
                   bun "$${AQUA_ROOT}/apps/order-worker/src/main.ts"
                   --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
+                  --ready-out "$${AQUA_STATE_DIR}/order-worker.ready"
                 depends_on:
                   postgres-init:
                     condition: process_completed_successfully
@@ -218,19 +234,30 @@
                 availability:
                   restart: on_failure
                   backoff_seconds: 2
+                readiness_probe:
+                  exec:
+                    command: test -f "$${AQUA_STATE_DIR}/order-worker.ready"
+                  initial_delay_seconds: 1
+                  period_seconds: 1
+                  timeout_seconds: 2
+                  success_threshold: 1
+                  failure_threshold: 30
           '';
         in
         pkgs.writeShellApplication {
-          name = "dev";
+          name = commandName;
           runtimeInputs = [
             aube
             pkgs.bun
+            pkgs.curl
             pkgs.postgresql_18
             pkgs.process-compose
             pkgs.foundry
             pkgs.openssl
           ];
           text = ''
+            export LANG=C.UTF-8
+            export LC_ALL=C.UTF-8
             export AQUA_ROOT="$PWD"
             # node_modules/.bin holds wallet-cli ("@ledgerhq/wallet-cli"), which secret-broker
             # (real, non-fixture mode) shells out to. The devShell shellHook already prepends
@@ -247,6 +274,9 @@
             export AQUA_BROKER_SOCKET="''${AQUA_BROKER_SOCKET:-$AQUA_STATE_DIR/secret-broker.sock}"
             export AQUA_API_PORT="''${AQUA_API_PORT:-8787}"
             export AQUA_FACILITATOR_PORT="''${AQUA_FACILITATOR_PORT:-8788}"
+            aube install
+            bash "$AQUA_ROOT/scripts/ledger-bootstrap.sh"
+            rm -f "$AQUA_STATE_DIR/activity-worker.ready" "$AQUA_STATE_DIR/order-worker.ready"
             if [ ! -d "$AQUA_STATE_DIR/postgresql" ]; then
               initdb -D "$AQUA_STATE_DIR/postgresql" --auth=trust
             fi
@@ -263,7 +293,8 @@
           api = appProgram pkgs "aqua-api" "apps/api/src/main.ts";
           worker = appProgram pkgs "aqua-activity-worker" "apps/worker/src/main.ts";
           orderWorker = appProgram pkgs "aqua-order-worker" "apps/order-worker/src/main.ts";
-          dev = devStack pkgs aube aqua swapvm x402 permit2;
+          dev = devStack pkgs aube aqua swapvm x402 permit2 "dev" true;
+          start = devStack pkgs aube aqua swapvm x402 permit2 "aqua-start" false;
           checkLocal = pkgs.writeShellApplication {
             name = "check-local";
             runtimeInputs = [
@@ -280,10 +311,14 @@
           ledgerBootstrap = pkgs.writeShellApplication {
             name = "ledger-bootstrap";
             runtimeInputs = [
+              aube
               pkgs.bun
               pkgs.openssl
             ];
             text = ''
+              export LANG=C.UTF-8
+              export LC_ALL=C.UTF-8
+              aube install
               export PATH="$PWD/node_modules/.bin:$PATH"
               exec bash "$PWD/scripts/ledger-bootstrap.sh" "$@"
             '';
@@ -296,6 +331,7 @@
             api
             worker
             dev
+            start
             checkLocal
             ledgerBootstrap
             ;
@@ -317,6 +353,10 @@
           dev = {
             type = "app";
             program = "${packages.dev}/bin/dev";
+          };
+          start = {
+            type = "app";
+            program = "${packages.start}/bin/aqua-start";
           };
           worker = {
             type = "app";
@@ -360,13 +400,19 @@
         let
           pkgs = pkgsFor system;
           aube = aube171 pkgs;
-          dev = devStack pkgs aube aqua swapvm x402 permit2;
+          dev = devStack pkgs aube aqua swapvm x402 permit2 "dev" true;
+          start = devStack pkgs aube aqua swapvm x402 permit2 "aqua-start" false;
+          ledgerBootstrap = self.packages.${system}.ledgerBootstrap;
         in
         {
           default = pkgs.mkShell {
+            LANG = "C.UTF-8";
+            LC_ALL = "C.UTF-8";
             packages = [
               aube
               dev
+              start
+              ledgerBootstrap
               pkgs.bun
               pkgs.nodejs
               pkgs.yarn
@@ -391,15 +437,6 @@
               export AQUA_STATE_DIR="''${AQUA_STATE_DIR:-$PWD/.data}"
               export DATABASE_URL="''${DATABASE_URL:-postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend}"
               mkdir -p "$AQUA_STATE_DIR"
-              if ! pg_isready -h 127.0.0.1 -p 5432 -d postgres >/dev/null 2>&1; then
-                if [ ! -d "$AQUA_STATE_DIR/postgresql" ]; then
-                  initdb -D "$AQUA_STATE_DIR/postgresql" --auth=trust
-                fi
-                pg_ctl -D "$AQUA_STATE_DIR/postgresql" -l "$AQUA_STATE_DIR/postgresql.log" start
-              fi
-              createuser -h 127.0.0.1 aqua 2>/dev/null || true
-              createdb -h 127.0.0.1 -O aqua aqua_backend 2>/dev/null || true
-              bun "$AQUA_ROOT/scripts/migrate.ts"
             '';
           };
         }
