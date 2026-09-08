@@ -41,6 +41,7 @@ describe("PASETO access tokens", () => {
     expect(envelope.footer.kid.startsWith("k4.pid.")).toBeTrue();
     expect(verifierFor([pair.publicKey]).authenticate(token)).toEqual({
       address, sessionId, scopes: new Set(AUTHENTICATION_SCOPES),
+      authenticationMethods: new Set(["siwe"]), clientId: "aqua-rest",
     });
   });
 

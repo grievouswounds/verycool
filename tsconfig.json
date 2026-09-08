@@ -28,7 +28,9 @@
       "@aqua/contracts": ["packages/contracts/src/index.ts"],
       "@aqua/adapters": ["packages/adapters/src/index.ts"],
       "@aqua/activity": ["packages/activity/src/index.ts"],
-      "@aqua/orderbook": ["packages/orderbook/src/index.ts"]
+      "@aqua/orderbook": ["packages/orderbook/src/index.ts"],
+      "@aqua/security": ["packages/security/src/index.ts"],
+      "@aqua/x402-adapter": ["packages/x402-adapter/src/index.ts"]
     }
   },
   "include": ["apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "eslint.config.ts"],

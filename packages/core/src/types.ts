@@ -81,6 +81,8 @@ export interface AuthenticatedPrincipal {
   readonly address: Address;
   readonly scopes: ReadonlySet<AuthenticationScope>;
   readonly sessionId: string;
+  readonly authenticationMethods?: ReadonlySet<"siwe" | "fido2" | "hwk">;
+  readonly clientId?: string;
 }
 
 export const AUTHENTICATION_SCOPES = [

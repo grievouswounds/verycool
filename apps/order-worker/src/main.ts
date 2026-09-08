@@ -1,66 +1,22 @@
-import { PostgresKeeperJobRepository, PostgresTradingRepository, createDatabase, closeDatabase } from "@aqua/adapters";
-import { CubaneTransactionSigner, JsonRpcClient, initializeCubane } from "@aqua/evm";
-import { Keeper, OrderBookIndexer, TriggerEvaluator } from "@aqua/orderbook";
-import { hexSchema } from "@aqua/core";
 import { randomUUID } from "node:crypto";
-import { loadOrderWorkerConfiguration } from "./config.ts";
+import { PostgresKeeperJobRepository, PostgresTradingRepository, createDatabase, closeDatabase } from "@aqua/adapters";
+import { hexSchema, loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
+import { JsonRpcClient, initializeCubane } from "@aqua/evm";
+import type { Eip1559Transaction } from "@aqua/evm";
+import { Keeper, OrderBookIndexer, TriggerEvaluator } from "@aqua/orderbook";
+import { SecretBrokerClient } from "@aqua/security";
 
-const config = loadOrderWorkerConfiguration(Bun.env);
-initializeCubane();
-const database = createDatabase(config.DATABASE_URL);
-await database.connect();
-const repository = new PostgresTradingRepository(database);
-await repository.initialize();
-const rpc = new JsonRpcClient(new URL(config.RPC_URL), config.RPC_TIMEOUT_MS);
-const indexer = new OrderBookIndexer(repository, rpc, {
-  chainId: config.CHAIN_ID,
-  contracts: config.ORDERBOOK_CONTRACTS, startBlock: BigInt(config.ORDERBOOK_START_BLOCK),
-  limitRouters: [config.LIMIT_SWAP_ROUTER_ADDRESS], pairs: config.ORDERBOOK_PAIRS,
-  confirmations: BigInt(config.ORDERBOOK_CONFIRMATIONS), blockChunkSize: BigInt(config.ORDERBOOK_BLOCK_CHUNK_SIZE),
-});
-const keyText = (await Bun.file(config.KEEPER_PRIVATE_KEY_FILE).text()).trim();
-if (keyText.length !== 66) throw new Error("Keeper secret file must contain one 32-byte hex key");
-const signer = new CubaneTransactionSigner(hexSchema.parse(keyText));
-const keeperRepository = new PostgresKeeperJobRepository(database);
-await keeperRepository.initialize();
-const keeper = new Keeper(keeperRepository, rpc, signer, {
-  chainId: config.CHAIN_ID, allowedTargets: config.KEEPER_ALLOWED_TARGETS,
-  allowedSelectors: config.KEEPER_ALLOWED_SELECTORS.map((value) => hexSchema.parse(value)), gasLimit: BigInt(config.KEEPER_GAS_LIMIT),
-  maxFeePerGas: BigInt(config.KEEPER_MAX_FEE_GWEI) * 1_000_000_000n,
-  replacementSeconds: config.KEEPER_REPLACEMENT_SECONDS, leaseSeconds: config.KEEPER_LEASE_SECONDS,
-});
-const triggers = new TriggerEvaluator(repository, keeperRepository, {
-  controller: config.ORDER_CONTROLLER_ADDRESS,
-  minimumBlocks: BigInt(config.TRIGGER_MINIMUM_BLOCKS), minimumSeconds: BigInt(config.TRIGGER_MINIMUM_SECONDS),
-});
-const workerId = randomUUID();
-const runCycle = async (): Promise<void> => {
-  await indexer.runOnce();
-  const head = await rpc.blockNumber();
-  if (head >= BigInt(config.ORDERBOOK_CONFIRMATIONS)) {
-    const confirmed = await rpc.block(head - BigInt(config.ORDERBOOK_CONFIRMATIONS));
-    await triggers.runOnce(confirmed.number, confirmed.timestamp);
-  }
-  await keeper.runOnce(workerId);
-};
-let stopped = false;
-let timer: ReturnType<typeof setTimeout> | undefined;
-const schedule = (): void => {
-  if (stopped) return;
-  timer = setTimeout(() => {
-    void runCycle().catch((error: unknown) => {
-      console.error(JSON.stringify({
-        level: "error", component: "order-worker", message: error instanceof Error ? error.message : "Unknown worker error",
-      }));
-    }).finally(schedule);
-  }, config.ORDERBOOK_POLL_INTERVAL_SECONDS * 1_000);
-};
-await runCycle();
-schedule();
-const shutdown = async (): Promise<void> => {
-  stopped = true;
-  if (timer !== undefined) clearTimeout(timer);
-  await closeDatabase(database);
-};
-process.once("SIGTERM", () => { void shutdown(); });
-process.once("SIGINT", () => { void shutdown(); });
+const manifest=await loadRuntimeManifest(Bun.argv);const defaults=localProfileDefaults;
+initializeCubane();const database=createDatabase(manifest.services.databaseUrl);await database.connect();
+const repository=new PostgresTradingRepository(database);await repository.initialize();
+const rpc=new JsonRpcClient(new URL(manifest.chain.rpcUrl),defaults.rpcTimeoutMs);
+const indexer=new OrderBookIndexer(repository,rpc,{chainId:manifest.chain.id,contracts:manifest.indexer.contracts,startBlock:BigInt(manifest.indexer.startBlock),limitRouters:[manifest.contracts.limitSwapRouter.address],pairs:manifest.fixtures.pairs,confirmations:BigInt(manifest.indexer.confirmations),blockChunkSize:BigInt(defaults.orderbookBlockChunkSize)});
+const broker=new SecretBrokerClient(manifest.services.brokerSocket);const identity=await broker.identity();
+const keeperRepository=new PostgresKeeperJobRepository(database);await keeperRepository.initialize();
+const signer={address:identity.keeper,sign:(transaction:Eip1559Transaction)=>broker.signEip1559(transaction)};
+const keeper=new Keeper(keeperRepository,rpc,signer,{chainId:manifest.chain.id,allowedTargets:manifest.keeper.allowedTargets,allowedSelectors:manifest.keeper.allowedSelectors.map((selector)=>hexSchema.parse(selector)),gasLimit:defaults.keeperGasLimitCeiling,maxFeePerGas:defaults.keeperMaxFeePerGasCeiling,replacementSeconds:defaults.keeperReplacementSeconds,leaseSeconds:defaults.keeperLeaseSeconds});
+const triggers=new TriggerEvaluator(repository,keeperRepository,{controller:manifest.contracts.intentController.address,minimumBlocks:BigInt(defaults.triggerMinimumBlocks),minimumSeconds:BigInt(defaults.triggerMinimumSeconds)});
+console.log(JSON.stringify({level:"info",component:"order-worker",manifestHash:runtimeManifestHash(manifest)}));
+const workerId=randomUUID();const runCycle=async():Promise<void>=>{await indexer.runOnce();const head=await rpc.blockNumber();if(head>=BigInt(manifest.indexer.confirmations)){const confirmed=await rpc.block(head-BigInt(manifest.indexer.confirmations));await triggers.runOnce(confirmed.number,confirmed.timestamp);}await keeper.runOnce(workerId);};
+let stopped=false;let timer:ReturnType<typeof setTimeout>|undefined;const schedule=():void=>{if(stopped)return;timer=setTimeout(()=>{void runCycle().catch((error:unknown)=>{console.error(JSON.stringify({level:"error",component:"order-worker",message:error instanceof Error?error.message:"Unknown worker error"}));}).finally(schedule);},defaults.orderbookPollIntervalSeconds*1_000);};
+await runCycle();schedule();const shutdown=async():Promise<void>=>{stopped=true;if(timer!==undefined)clearTimeout(timer);await closeDatabase(database);};process.once("SIGTERM",()=>{void shutdown();});process.once("SIGINT",()=>{void shutdown();});

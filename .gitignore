@@ -1,9 +1,57 @@
+# Dependencies and package-manager state
 node_modules/
-dist/
-coverage/
+.pnp.*
+.yarn/cache/
+.yarn/install-state.gz
+
+# JavaScript/TypeScript build and test output
+**/.turbo/
+**/dist/
+**/bundle/
+**/coverage/
+*.tsbuildinfo
+*.log
+
+# Solidity tool output
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/coverage/
+contracts/lcov.info
+contracts/snapshots/
+typechain-types/
+
+# Local-chain deployments and generated runtime evidence
+.local-stack/
+runtime-manifest.json
+runtime-manifest-*.json
+receipts/
+reports/
+*.pid
+*.sock
+
+# Secrets and local configuration. Only the documented template is committed.
+.env
+.env.*
+.env copy*
+!.env.example
+
+# Local service state
+.data/
+.state/
+tmp/
+.tmp/
+
+# Nix/devenv output
+.direnv/
+.devenv/
 result
 result-*
-.env
-.data/
-.direnv/
-*.tsbuildinfo
+
+# Editors and operating systems
+.DS_Store
+.AppleDouble
+.idea/
+.vscode/
+*.swp
+*~

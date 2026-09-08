@@ -1,17 +1,24 @@
 import { activityListQuerySchema, activityWipeSchema, addressSchema, AppError, challengeRequestSchema, parseStrictJson, sessionRequestSchema, subscriptionRequestSchema, tradingRequestSchema } from "@aqua/core";
-import type { AuthenticatedPrincipal, AuthenticationScope } from "@aqua/core";
-import type { AuthService } from "@aqua/adapters";
+import type { AuthenticatedPrincipal, AuthenticationScope, RuntimeManifest } from "@aqua/core";
+import type { AuthService, LedgerWebAuthnService, OAuthService } from "@aqua/adapters";
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { ActivityService } from "@aqua/activity";
 import type { TradingService } from "@aqua/orderbook";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { docsHtml, openApiDocument } from "./openapi.ts";
 import { swaggerCssResponse, swaggerJavaScriptResponse } from "./swagger.ts";
+import { handleMcp } from "./mcp.ts";
 
 export interface ServerDependencies {
   readonly trading: TradingService;
   readonly auth: AuthService;
   readonly activity: ActivityService;
+  readonly webauthn: LedgerWebAuthnService;
+  readonly oauth: OAuthService;
   readonly corsOrigin: string;
+  readonly issuer: string;
+  readonly resource: string;
+  readonly manifest: RuntimeManifest;
   readonly readiness: () => Promise<boolean>;
 }
 
@@ -96,6 +103,14 @@ const cookie = (request: Request, name: string): string | null => {
   }
   return null;
 };
+const registrationResponseSchema=z.custom<RegistrationResponseJSON>((value)=>typeof value==="object"&&value!==null);
+const authenticationResponseSchema=z.custom<AuthenticationResponseJSON>((value)=>typeof value==="object"&&value!==null);
+const webauthnFinishRegistrationSchema=z.object({id:z.uuid(),response:registrationResponseSchema}).strict();
+const webauthnStartAuthenticationSchema=z.object({address:addressSchema}).strict();
+const webauthnFinishAuthenticationSchema=z.object({id:z.uuid(),response:authenticationResponseSchema,clientId:z.string().min(1).max(256).default("aqua-mcp-local")}).strict();
+const oauthStartSchema=z.object({address:addressSchema,authorization:z.object({client_id:z.string(),redirect_uri:z.url(),resource:z.url(),scope:z.string(),state:z.string(),code_challenge:z.string(),code_challenge_method:z.literal("S256"),response_type:z.literal("code")}).strict()}).strict();
+const oauthCompleteSchema=z.object({id:z.uuid(),response:authenticationResponseSchema}).strict();
+const form=async(request:Request):Promise<URLSearchParams>=>{const media=request.headers.get("content-type")?.split(";",1)[0]?.trim();if(media!=="application/x-www-form-urlencoded")throw new AppError(415,"invalid_request","OAuth token requests must be form encoded");const text=await request.text();if(text.length>16_384)throw new AppError(413,"invalid_request","OAuth form is too large");return new URLSearchParams(text);};
 
 export const authenticationChallenge = (error: AppError): string | null => {
   if (error.status === 401 && error.type === "urn:aqua:error:authentication") {
@@ -135,6 +150,14 @@ const execute = async (request: Request, action: () => Promise<Response>, corsOr
 
 export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve.Options<undefined> => ({
   routes: {
+    "/.well-known/oauth-protected-resource": () => Response.json({resource:dependencies.resource,authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
+    "/.well-known/oauth-authorization-server": () => Response.json({issuer:dependencies.issuer,authorization_endpoint:`${dependencies.issuer}/authorize`,token_endpoint:`${dependencies.issuer}/token`,registration_endpoint:`${dependencies.issuer}/register`,response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],code_challenge_methods_supported:["S256"],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
+    "/authorize": new Response("<!doctype html><meta charset=utf-8><title>Ledger MCP sign-in</title><h1>Ledger MCP sign-in</h1><p>Use the Ledger Security Key app to approve this authorization request.</p><p>This endpoint is completed by the local MCP bridge through <code>/oauth/authorize/start</code> and <code>/oauth/authorize/complete</code>.</p>",{headers:{"content-type":"text/html; charset=utf-8","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'"}}),
+    "/register": {POST:(request)=>execute(request,async()=>Response.json(await dependencies.oauth.register(await parseJson(request)),{status:201}),dependencies.corsOrigin)},
+    "/oauth/authorize/start": {POST:(request)=>execute(request,async()=>{const input=oauthStartSchema.parse(await parseJson(request));const ceremony=await dependencies.webauthn.authenticationOptions(input.address);await dependencies.oauth.begin(input.address,input.authorization,ceremony.id);return Response.json(ceremony);},dependencies.corsOrigin)},
+    "/oauth/authorize/complete": {POST:(request)=>execute(request,async()=>{const input=oauthCompleteSchema.parse(await parseJson(request));const assertion=await dependencies.webauthn.authenticate(input.id,input.response);return Response.json({redirect_uri:await dependencies.oauth.complete(input.id,assertion.owner)});},dependencies.corsOrigin)},
+    "/token": {POST:(request)=>execute(request,async()=>{const input=await form(request);const grant=input.get("grant_type");const clientId=input.get("client_id")??"";const resource=input.get("resource")??"";if(grant==="authorization_code")return Response.json(await dependencies.oauth.exchangeCode(input.get("code")??"",clientId,input.get("redirect_uri")??"",resource,input.get("code_verifier")??""));if(grant==="refresh_token")return Response.json(await dependencies.oauth.refresh(input.get("refresh_token")??"",clientId,resource));throw new AppError(400,"unsupported_grant_type","Only authorization_code and refresh_token are accepted");},dependencies.corsOrigin)},
+    "/mcp": {POST:(request)=>handleMcp(request,dependencies.manifest,(token)=>dependencies.auth.authenticate(token))},
     "/health/live": new Response("ok", { headers: { "content-type": "text/plain" } }),
     "/health/ready": async () => (await dependencies.readiness())
       ? Response.json({ status: "ready" })
@@ -167,6 +190,10 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
         return Response.json(await dependencies.auth.challenge(input.address), { status: 201 });
       }, dependencies.corsOrigin),
     },
+    "/v1/auth/ledger/registration/options": { POST:(request)=>execute(request,async()=>{const principal=await bearer(request,dependencies.auth);if(principal.authenticationMethods?.has("fido2")===true)throw new AppError(409,"urn:aqua:error:enrollment","Ledger credential is already active");return Response.json(await dependencies.webauthn.registrationOptions(principal.address));},dependencies.corsOrigin) },
+    "/v1/auth/ledger/registration/verify": { POST:(request)=>execute(request,async()=>{const principal=await bearer(request,dependencies.auth);const input=webauthnFinishRegistrationSchema.parse(await parseJson(request));const result=await dependencies.webauthn.register(input.id,input.response);if(result.owner!==principal.address)throw new AppError(401,"urn:aqua:error:enrollment","SIWE owner does not match the Ledger credential");return Response.json(result,{status:201});},dependencies.corsOrigin) },
+    "/v1/auth/ledger/authentication/options": { POST:(request)=>execute(request,async()=>{const input=webauthnStartAuthenticationSchema.parse(await parseJson(request));return Response.json(await dependencies.webauthn.authenticationOptions(input.address));},dependencies.corsOrigin) },
+    "/v1/auth/ledger/authentication/verify": { POST:(request)=>execute(request,async()=>{const input=webauthnFinishAuthenticationSchema.parse(await parseJson(request));const result=await dependencies.webauthn.authenticate(input.id,input.response);return Response.json(await dependencies.auth.issueHardware(result.owner,input.clientId,["trading:read","trading:write","activity:read","activity:write"]));},dependencies.corsOrigin) },
     "/v1/erc20-monitor/subscriptions": {
       GET: (request) => execute(request, async () => {
         const principal = await bearer(request, dependencies.auth);
@@ -236,8 +263,8 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
   },
   fetch(request) {
     const path = new URL(request.url).pathname;
-    const getPaths = new Set(["/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/v1/capabilities", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
-    const postPaths = new Set(["/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/trading", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
+    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/v1/capabilities", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
+    const postPaths = new Set(["/register","/oauth/authorize/start","/oauth/authorize/complete","/token","/mcp","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/trading", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
     if (/^\/v1\/erc20-monitor\/subscriptions\/0x[0-9a-fA-F]{40}$/u.test(path)) {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
       response.headers.set("allow", "DELETE");

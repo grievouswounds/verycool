@@ -13,7 +13,7 @@ export interface KeeperJobRepository {
   markComplete(id: string, worker: string, blockNumber: bigint): Promise<void>;
   markFailed(id: string, worker: string, reason: string): Promise<void>;
 }
-export interface KeeperTransactionSigner { readonly address: Address; sign(transaction: Eip1559Transaction): Hex }
+export interface KeeperTransactionSigner { readonly address: Address; sign(transaction: Eip1559Transaction): Hex | Promise<Hex> }
 export interface KeeperConfiguration {
   readonly chainId: number; readonly allowedTargets: readonly Address[]; readonly allowedSelectors: readonly Hex[];
   readonly gasLimit: bigint; readonly maxFeePerGas: bigint; readonly replacementSeconds: number; readonly leaseSeconds: number;
@@ -48,7 +48,7 @@ export class Keeper {
       const estimated = await this.rpc.estimateGas({ to: job.target, from: this.signer.address, data: job.data, value: quantitySchema.parse(`0x${job.value.toString(16)}`) });
       const gas = estimated + estimated / 5n;
       if (gas > this.config.gasLimit) throw new Error("Keeper gas ceiling exceeded");
-      const raw = this.signer.sign({
+      const raw = await this.signer.sign({
         chainId: BigInt(this.config.chainId), nonce, maxPriorityFeePerGas: priority, maxFeePerGas,
         gas, to: job.target, value: job.value, data: job.data,
       });

@@ -2,9 +2,13 @@
   description = "Native Bun Aqua transaction-preparation backend";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.aqua = { url = "github:1inch/aqua/9c5c42e5840e8741fba3597c48456c9510212b66"; flake = false; };
+  inputs.swapvm = { url = "github:1inch/swap-vm/f09a41e689240adc645934f965c8061749397cd2"; flake = false; };
+  inputs.x402 = { url = "github:x402-foundation/x402/241df66079aa22d5572e940b2b5340b7a577963a"; flake = false; };
+  inputs.permit2 = { url = "github:Uniswap/permit2/cc56ad0f3439c502c246fc5cfcc3db92bb8b7219"; flake = false; };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, aqua, swapvm, x402, permit2 }:
     let
       systems = [
         "aarch64-darwin"
@@ -43,17 +47,10 @@
         };
       appProgram =
         pkgs: name: source:
-        pkgs.stdenvNoCC.mkDerivation {
-          pname = name;
-          version = "0.1.0";
-          src = source;
-          dontBuild = true;
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          installPhase = ''
-            mkdir -p $out/lib/${name} $out/bin
-            cp main.js $out/lib/${name}/main.js
-            makeWrapper ${pkgs.bun}/bin/bun $out/bin/${name} --add-flags "$out/lib/${name}/main.js"
-          '';
+        pkgs.writeShellApplication {
+          inherit name;
+          runtimeInputs = [ pkgs.bun ];
+          text = ''exec bun "$PWD/${source}" "$@"'';
         };
       devStack =
         pkgs: aube:
@@ -121,13 +118,8 @@
             pkgs.process-compose
           ];
           text = ''
-            if [ ! -f .env ]; then
-              echo "Missing .env. Copy .env.example to .env and configure it before starting the development stack." >&2
-              exit 1
-            fi
-
             export AQUA_ROOT="$PWD"
-            export AQUA_STATE_DIR="$PWD/.data"
+            export AQUA_STATE_DIR="''${AQUA_STATE_DIR:-$PWD/.data}"
             export DATABASE_URL="''${DATABASE_URL:-postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend}"
             if [ ! -d "$AQUA_STATE_DIR/postgresql" ]; then
               initdb -D "$AQUA_STATE_DIR/postgresql" --auth=trust
@@ -142,10 +134,23 @@
         let
           pkgs = pkgsFor system;
           aube = aube171 pkgs;
-          api = appProgram pkgs "aqua-api" ./apps/api/dist;
-          worker = appProgram pkgs "aqua-activity-worker" ./apps/worker/dist;
-          orderWorker = appProgram pkgs "aqua-order-worker" ./apps/order-worker/dist;
+          api = appProgram pkgs "aqua-api" "apps/api/src/main.ts";
+          worker = appProgram pkgs "aqua-activity-worker" "apps/worker/src/main.ts";
+          orderWorker = appProgram pkgs "aqua-order-worker" "apps/order-worker/src/main.ts";
           dev = devStack pkgs aube;
+          checkLocal = pkgs.writeShellApplication {
+            name = "check-local";
+            runtimeInputs = [ aube pkgs.bun pkgs.foundry pkgs.git pkgs.jq pkgs.nix pkgs.postgresql_18 ];
+            text = ''exec bash "$PWD/scripts/check-local.sh" "$@"'';
+          };
+          ledgerBootstrap = pkgs.writeShellApplication {
+            name = "ledger-bootstrap";
+            runtimeInputs = [ pkgs.bun pkgs.openssl ];
+            text = ''
+              export PATH="$PWD/node_modules/.bin:$PATH"
+              exec bash "$PWD/scripts/ledger-bootstrap.sh" "$@"
+            '';
+          };
         in
         {
           default = api;
@@ -154,6 +159,8 @@
             api
             worker
             dev
+            checkLocal
+            ledgerBootstrap
             ;
           order-worker = orderWorker;
         }
@@ -182,6 +189,8 @@
             type = "app";
             program = "${packages.order-worker}/bin/aqua-order-worker";
           };
+          check-local = { type = "app"; program = "${packages.checkLocal}/bin/check-local"; };
+          ledger-bootstrap = { type = "app"; program = "${packages.ledgerBootstrap}/bin/ledger-bootstrap"; };
         }
       );
 
@@ -196,7 +205,8 @@
             touch $out
           '';
           dependency-policy = pkgs.runCommand "dependency-policy" { } ''
-            ! grep -E '(^|[/@])(viem|ethers|web3)(@|:)' ${./aube-lock.yaml}
+            ! grep -E '(^|[/@])(ethers|web3)(@|:)' ${./aube-lock.yaml}
+            ! grep -E '"(viem|ethers|web3)"[[:space:]]*:' ${./package.json}
             touch $out
           '';
         }
@@ -216,6 +226,11 @@
               dev
               pkgs.bun
               pkgs.nodejs
+              pkgs.yarn
+              pkgs.gnumake
+              pkgs.jq
+              pkgs.git
+              pkgs.openssl
               pkgs.postgresql_18
               pkgs.foundry
               pkgs.process-compose
@@ -225,7 +240,12 @@
             shellHook = ''
               aube install
               export AQUA_ROOT="$PWD"
-              export AQUA_STATE_DIR="$PWD/.data"
+              export PATH="$PWD/node_modules/.bin:$PATH"
+              export AQUA_UPSTREAM=${aqua}
+              export SWAPVM_UPSTREAM=${swapvm}
+              export X402_UPSTREAM=${x402}
+              export PERMIT2_UPSTREAM=${permit2}
+              export AQUA_STATE_DIR="''${AQUA_STATE_DIR:-$PWD/.data}"
               export DATABASE_URL="''${DATABASE_URL:-postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend}"
               mkdir -p "$AQUA_STATE_DIR"
               if ! pg_isready -h 127.0.0.1 -p 5432 -d postgres >/dev/null 2>&1; then

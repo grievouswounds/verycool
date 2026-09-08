@@ -23,6 +23,8 @@ const accessTokenClaimsSchema = z.object({
   sid: z.uuid(),
   chain_id: z.number().int().positive(),
   scope: z.string().min(1).max(512),
+  amr: z.array(z.enum(["siwe", "fido2", "hwk"])).min(1),
+  client_id: z.string().min(1).max(256),
 }).strict();
 const authUriSchema = z.url().refine((value) => {
   const url = new URL(value);
@@ -55,6 +57,8 @@ export interface AccessTokenGrant {
   readonly address: Address;
   readonly sessionId: string;
   readonly scopes: readonly AuthenticationScope[];
+  readonly amr?: readonly ("siwe" | "fido2" | "hwk")[];
+  readonly clientId?: string;
 }
 
 const paserkPublicId = (publicKey: string): string => {
@@ -123,6 +127,8 @@ export class PasetoAccessTokenVerifier {
       address: payload.sub,
       sessionId: payload.sid,
       scopes: scopesFromClaim(payload.scope),
+      authenticationMethods: new Set(payload.amr),
+      clientId: payload.client_id,
     };
   }
 }
@@ -167,6 +173,8 @@ export class PasetoAccessTokenIssuer {
       sid: sessionId,
       chain_id: this.config.chainId,
       scope: scopes.join(" "),
+      amr: grant.amr ?? ["siwe"],
+      client_id: grant.clientId ?? "aqua-rest",
     }, { footer: { kid: this.activeKeyId }, addIat: false, addExp: false });
   }
 }
