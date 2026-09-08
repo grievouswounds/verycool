@@ -9,6 +9,7 @@ const base = addressSchema.parse("0x2222222222222222222222222222222222222222");
 const quote = addressSchema.parse("0x3333333333333333333333333333333333333333");
 const router = addressSchema.parse("0x4444444444444444444444444444444444444444");
 const orderHash = hashSchema.parse(`0x${"11".repeat(32)}`);
+const rejected = async (promise: Promise<unknown>): Promise<unknown> => { try { await promise; return null; } catch (error: unknown) { return error; } };
 
 const indexedOrder = (side: "buy" | "sell", price: string, amount: string): IndexedOrder => ({
   id: `eip155:1/${side}/${price}`, chainId: "eip155:1", maker, router, orderHash,
@@ -39,8 +40,10 @@ class MemoryRepository implements TradingRepository {
 }
 
 class ProtocolStub implements ProtocolGateway {
+  public preparedSwaps = 0;
   public async prepareLimitFromTrading() { return { transaction: "ship" }; }
   public async prepareMarketRoute() { return { transaction: "swap" }; }
+  public async prepareSwap() { this.preparedSwaps += 1; return { transaction: "prepared-swap" }; }
   public prepareCancellation() { return { transaction: "dock" }; }
   public async prepareWrappedNative() { return { transaction: "wrap" }; }
   public async queryBalances() { return []; }
@@ -79,5 +82,16 @@ describe("unified trading service", () => {
     expect(result.status).toBe(402);
     expect(result.headers?.["aqua-authorization-required"]).toBeString();
     expect(repository.intents).toHaveLength(1);
+  });
+
+  test("requires trading:write and returns an unsigned prepared swap", async () => {
+    const repository = new MemoryRepository();
+    const protocol = new ProtocolStub();
+    const service = new TradingService(repository, protocol, new IntentAuthorizationService(repository, new RpcStub(), { chainId: 1, controller: router, validitySeconds: 300 }), 1);
+    const command = { action: "prepareSwap", swap: { routerKind: "aquaAmm", encodedOrder: hexSchema.parse("0x00"), tokenIn: base, tokenOut: quote, amountIn: "1", slippageBps: 50, payWithNative: false, receiveNative: false } } as const;
+    expect(await rejected(service.execute(command, { address: maker, sessionId: "s", scopes: new Set(["trading:read"]) }, null))).toMatchObject({ status: 403 });
+    const result = await service.execute(command, { address: maker, sessionId: "s", scopes: new Set(["trading:write"]) }, null);
+    expect(result.body["result"]).toEqual({ transaction: "prepared-swap" });
+    expect(protocol.preparedSwaps).toBe(1);
   });
 });

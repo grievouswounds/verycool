@@ -100,6 +100,9 @@ export class TradingService {
     if (command.action === "manageWrappedNative") {
       return this.ok(command.action, await this.protocol.prepareWrappedNative(command.operation, command.amount, actor.address));
     }
+    if (command.action === "prepareSwap") {
+      return this.ok(command.action, await this.protocol.prepareSwap(command.swap, actor.address));
+    }
     if (command.action === "createOrder") return this.create(command, actor, authorizationHeader);
     if (command.action === "executeOrder") {
       const selected = await this.ownedOrPublicOrder(command.orderId, null);

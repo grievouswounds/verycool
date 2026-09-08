@@ -30,7 +30,8 @@
       "@aqua/activity": ["packages/activity/src/index.ts"],
       "@aqua/orderbook": ["packages/orderbook/src/index.ts"],
       "@aqua/security": ["packages/security/src/index.ts"],
-      "@aqua/x402-adapter": ["packages/x402-adapter/src/index.ts"]
+      "@aqua/x402-adapter": ["packages/x402-adapter/src/index.ts"],
+      "@aqua/quoter": ["packages/quoter/src/index.ts"]
     }
   },
   "include": ["apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "eslint.config.ts"],

@@ -55,7 +55,22 @@ describe("agent-first trading input language", () => {
       { action: "executeOrder", orderId: "eip155:1/0xabc", size: { denomination: "base", amount: "1" } },
       { action: "batch", operations: [{ operation: "cancel", orderId: "eip155:1/0xabc" }] },
       { action: "manageWrappedNative", operation: "wrap", amount: "1.25" },
+      { action: "prepareSwap", swap: { encodedOrder: "0x00", tokenIn: pair.baseToken, tokenOut: pair.quoteToken, amountIn: "1" } },
     ];
     for (const request of requests) expect(tradingRequestSchema.safeParse(request).success).toBe(true);
+  });
+
+  test("recognizes prepareSwap defaults and rejects caller-selected chains or ambiguous amounts", () => {
+    const result = tradingRequestSchema.parse({ action: "prepareSwap", swap: {
+      encodedOrder: "0x00", tokenIn: pair.baseToken, tokenOut: pair.quoteToken, amountOut: "2",
+    } });
+    if (result.action !== "prepareSwap") throw new Error("wrong variant");
+    expect(result.swap).toMatchObject({ routerKind: "aquaAmm", amountOut: "2", slippageBps: 50, payWithNative: false, receiveNative: false });
+    expect(tradingRequestSchema.safeParse({ action: "prepareSwap", swap: {
+      chainId: 1, encodedOrder: "0x00", tokenIn: pair.baseToken, tokenOut: pair.quoteToken, amountIn: "1",
+    } }).success).toBeFalse();
+    expect(tradingRequestSchema.safeParse({ action: "prepareSwap", swap: {
+      encodedOrder: "0x00", tokenIn: pair.baseToken, tokenOut: pair.quoteToken, amountIn: "1", amountOut: "2",
+    } }).success).toBeFalse();
   });
 });

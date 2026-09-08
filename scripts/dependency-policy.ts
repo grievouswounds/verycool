@@ -15,6 +15,11 @@ const found = [
   ...transitivelyForbidden.filter((name) => lock.includes(`/${name}@`) || lock.includes(`${name}:`)),
 ];
 
+if (await Bun.file("quoterserver/package.json").exists()) {
+  console.error("standalone quoterserver package must not be restored; use packages/quoter");
+  process.exit(1);
+}
+
 if (found.length > 0) {
   console.error(`prohibited dependencies: ${found.join(", ")}`);
   process.exit(1);

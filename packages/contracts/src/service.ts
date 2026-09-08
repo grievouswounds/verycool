@@ -29,6 +29,13 @@ export interface DirectSwapResult {
   readonly tokenDecimals: { readonly tokenIn: number; readonly tokenOut: number };
 }
 
+export interface DirectQuoteResult {
+  readonly chainId: number;
+  readonly orderHash: Hash;
+  readonly quote: Quote;
+  readonly tokenDecimals: { readonly tokenIn: number; readonly tokenOut: number };
+}
+
 export interface LimitOrderResult {
   readonly chainId: number;
   readonly encodedOrder: Hex;
@@ -91,13 +98,10 @@ export class ProtocolService {
     this.now = now;
   }
 
-  public async prepareDirect(input: DirectSwapRequest, principal: AuthenticatedPrincipal): Promise<DirectSwapResult> {
+  private async directQuoteContext(input: DirectSwapRequest, taker: Address) {
     const now = seconds(this.now().toISOString());
     const deadline = input.deadline === undefined ? now + BigInt(input.lifetimeSeconds ?? 300) : seconds(input.deadline);
     if (deadline <= now) throw validationError("deadline must be in the future");
-    if (input.payWithNative && input.tokenIn !== this.config.wrappedNativeToken) {
-      throw validationError("payWithNative requires tokenIn to be the configured wrapped-native token");
-    }
     if (input.receiveNative && input.tokenOut !== this.config.wrappedNativeToken) {
       throw validationError("receiveNative requires tokenOut to be the configured wrapped-native token");
     }
@@ -115,41 +119,63 @@ export class ProtocolService {
     const recipient = input.recipient === undefined ? {} : { recipient: input.recipient };
     const quoteTraits = encodeTakerTraits({
       exactIn, shouldUnwrap: input.receiveNative,
-      threshold: 0n, taker: principal.address, deadlineSeconds: deadline, ...recipient,
+      threshold: 0n, taker, deadlineSeconds: deadline, ...recipient,
     });
     const quoteData = encodeSwapVmCall("quote", order, input.tokenIn, input.tokenOut, requested, quoteTraits);
-    const quoted = decodeQuoteResult(await this.rpc.call({ from: principal.address, to: router, data: quoteData }));
+    const quoted = decodeQuoteResult(await this.rpc.call({ from: taker, to: router, data: quoteData }));
+    return { deadline, exactIn, order, quoted, recipient, requested, router, tokenInDecimals, tokenOutDecimals };
+  }
+
+  public async quoteDirect(input: DirectSwapRequest, taker: Address): Promise<DirectQuoteResult> {
+    const context = await this.directQuoteContext(input, taker);
+    return {
+      chainId: this.config.chainId,
+      orderHash: context.quoted.orderHash,
+      quote: {
+        amountIn: positiveAmountSchema.parse(formatTokenAmount(context.quoted.amountIn, context.tokenInDecimals)),
+        amountOut: positiveAmountSchema.parse(formatTokenAmount(context.quoted.amountOut, context.tokenOutDecimals)),
+        orderHash: context.quoted.orderHash,
+      },
+      tokenDecimals: { tokenIn: context.tokenInDecimals, tokenOut: context.tokenOutDecimals },
+    };
+  }
+
+  public async prepareDirect(input: DirectSwapRequest, principal: AuthenticatedPrincipal): Promise<DirectSwapResult> {
+    if (input.payWithNative && input.tokenIn !== this.config.wrappedNativeToken) {
+      throw validationError("payWithNative requires tokenIn to be the configured wrapped-native token");
+    }
+    const context = await this.directQuoteContext(input, principal.address);
     const bps = BigInt(input.slippageBps);
-    const threshold = exactIn
-      ? quoted.amountOut * (10_000n - bps) / 10_000n
-      : (quoted.amountIn * (10_000n + bps) + 9_999n) / 10_000n;
+    const threshold = context.exactIn
+      ? context.quoted.amountOut * (10_000n - bps) / 10_000n
+      : (context.quoted.amountIn * (10_000n + bps) + 9_999n) / 10_000n;
     const finalTraits = encodeTakerTraits({
-      exactIn, shouldUnwrap: input.receiveNative,
-      threshold, taker: principal.address, deadlineSeconds: deadline, ...recipient,
+      exactIn: context.exactIn, shouldUnwrap: input.receiveNative,
+      threshold, taker: principal.address, deadlineSeconds: context.deadline, ...context.recipient,
     });
-    const data = encodeSwapVmCall("swap", order, input.tokenIn, input.tokenOut, requested, finalTraits);
+    const data = encodeSwapVmCall("swap", context.order, input.tokenIn, input.tokenOut, context.requested, finalTraits);
     const value = 0n;
-    const gas = await this.rpc.estimateGas({ from: principal.address, to: router, data, value: quantityToHex(value) });
-    const requiredInput = exactIn ? requested : threshold;
+    const gas = await this.rpc.estimateGas({ from: principal.address, to: context.router, data, value: quantityToHex(value) });
+    const requiredInput = context.exactIn ? context.requested : threshold;
     const allowance = decodeUint256(await this.rpc.call({
-      from: principal.address, to: input.tokenIn, data: encodeAllowance(principal.address, router),
+      from: principal.address, to: input.tokenIn, data: encodeAllowance(principal.address, context.router),
     }));
     const approval = allowance < requiredInput
-      ? tx(this.config, principal.address, input.tokenIn, encodeApprove(router, requiredInput))
+      ? tx(this.config, principal.address, input.tokenIn, encodeApprove(context.router, requiredInput))
       : undefined;
     const preTransactions = input.payWithNative
       ? [tx(this.config, principal.address, this.config.wrappedNativeToken, selector("deposit()"), requiredInput)]
       : [];
     return {
-      chainId: this.config.chainId, orderHash: quoted.orderHash,
+      chainId: this.config.chainId, orderHash: context.quoted.orderHash,
       quote: {
-        amountIn: positiveAmountSchema.parse(formatTokenAmount(quoted.amountIn, tokenInDecimals)),
-        amountOut: positiveAmountSchema.parse(formatTokenAmount(quoted.amountOut, tokenOutDecimals)),
-        orderHash: quoted.orderHash,
+        amountIn: positiveAmountSchema.parse(formatTokenAmount(context.quoted.amountIn, context.tokenInDecimals)),
+        amountOut: positiveAmountSchema.parse(formatTokenAmount(context.quoted.amountOut, context.tokenOutDecimals)),
+        orderHash: context.quoted.orderHash,
       },
-      transaction: tx(this.config, principal.address, router, data, value, gas),
+      transaction: tx(this.config, principal.address, context.router, data, value, gas),
       ...(approval === undefined ? {} : { approval }), preTransactions,
-      tokenDecimals: { tokenIn: tokenInDecimals, tokenOut: tokenOutDecimals },
+      tokenDecimals: { tokenIn: context.tokenInDecimals, tokenOut: context.tokenOutDecimals },
     };
   }
 

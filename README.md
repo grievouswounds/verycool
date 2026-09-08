@@ -12,6 +12,7 @@ It also monitors confirmed ERC-20 transfers for addresses selected by authentica
 | Language | TypeScript 5.9 with the strictest compiler profile and zero first-party `any` |
 | Validation and OpenAPI | Zod 4, OpenAPI 3.1, vendored Swagger UI |
 | Ethereum | Cubane, Noble JavaScript crypto adapters, native-fetch EIP-1474 RPC |
+| Prices and quotes | Optional native-fetch 1inch spot prices and native SwapVM `eth_call` simulation |
 | Authentication | Explicit SIWE parsing, EOA/EIP-1271 verification, PASETO `v4.public` with PASERK key rotation |
 | Persistence | PostgreSQL and transactions |
 | Background collection | Separate Bun activity and confirmed-block order workers |
@@ -106,7 +107,19 @@ Authenticated endpoints require `Authorization: Bearer <access-token>`. Access t
 - `POST /v1/auth/challenges`: `{ "address": "0x…" }`
 - `POST /v1/auth/sessions`: `{ "challengeId": "uuid", "message": "exact challenge message", "signature": "0x…" }`
 - `POST /v1/auth/refresh`: no body; rotates the secure `refresh_token` cookie.
-- `POST /v1/trading`: the sole trading business route. Its `action` selects `createOrder`, `amendOrder`, `cancelOrders`, `executeOrder`, `batch`, `query`, or `manageWrappedNative`. Nested discriminators make incompatible combinations unrepresentable.
+- `POST /v1/trading`: the sole trading business route. Its `action` selects `createOrder`, `amendOrder`, `cancelOrders`, `executeOrder`, `prepareSwap`, `batch`, `query`, or `manageWrappedNative`. Nested discriminators make incompatible combinations unrepresentable.
+- `GET /v1/prices/address/{address}` and `GET /v1/prices/name/{name}`: authenticated deployment-chain spot prices. These return `503` when `ONEINCH_API_KEY` is not configured.
+- `POST /v1/quotes/aqua`: authenticated, read-only exact-input or exact-output simulation for one encoded Aqua order.
+
+`POST /v1/trading` also accepts `prepareSwap` for raw encoded orders. It quotes and simulates with the authenticated wallet as taker, then returns only unsigned approval, wrapping, and swap transactions; the API never accepts a wallet key or broadcasts on the caller's behalf.
+
+```json
+{"routerKind":"aquaLimit","encodedOrder":"0x…","tokenIn":"0x1111111111111111111111111111111111111111","tokenOut":"0x2222222222222222222222222222222222222222","amountIn":"1"}
+```
+
+```json
+{"action":"prepareSwap","swap":{"routerKind":"aquaLimit","encodedOrder":"0x…","tokenIn":"0x1111111111111111111111111111111111111111","tokenOut":"0x2222222222222222222222222222222222222222","amountIn":"1","slippageBps":"50"}}
+```
 
 All trading amounts and prices are human decimal strings. Price always means quote-token units per one base token. The backend resolves ERC-20 decimals and converts to atomic integers with exact `bigint` arithmetic and maker-favouring rounding. Scientific notation, signs, separators, noncanonical zeroes, excess precision, unknown fields, duplicate keys, and prototype keys are rejected.
 
@@ -164,6 +177,8 @@ Rotate access-token keys by deploying the new public key to every verifier first
 `ACTIVITY_CONFIRMATIONS` is required and must be chosen for the configured chain. Collection defaults to a 60-second interval, 1,000-block chunks, four concurrent subscriptions, a 120-second lease, and 100 active subscriptions per authenticated wallet. The worker and API must use the same RPC, PostgreSQL database, chain, and confirmation configuration.
 
 `dev` starts local PostgreSQL at `127.0.0.1:5432`, applies migrations, and then starts the API and both workers. Its data persists in the gitignored `.data/postgresql` directory. Configure `DATABASE_URL`, `RPC_URL`, and the contract addresses for the chain you intend to use.
+
+Set `ONEINCH_API_KEY` to enable the authenticated price endpoints. `ONEINCH_BASE_URL` defaults to `https://api.1inch.com` and `ONEINCH_DEFAULT_CURRENCY` defaults to `USD`. These settings do not affect Aqua quote/trade readiness; local Anvil chains are normally unsupported by the external price provider.
 
 `ORDERBOOK_CONTRACTS` is a strict JSON array of allowlisted contracts scanned from `ORDERBOOK_START_BLOCK`; `ORDERBOOK_PAIRS` is the bounded base/quote registry. The worker recognizes the exact current Aqua `Shipped`, `Docked`, `Pushed`, and `Pulled` events and SwapVM `Swapped` event. Only a decoded SwapVM order containing the backend's exact five-instruction limit grammar is projected into the public book. Orders, fills, human-decimal prices, remaining balances, raw evidence, and the canonical checkpoint are committed transactionally. A changed checkpoint hash causes deterministic rewind and replay.
 

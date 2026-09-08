@@ -115,6 +115,7 @@ export interface TradingRepository {
 export interface ProtocolGateway {
   prepareLimitFromTrading(order: TradingOrder, maker: Address): Promise<unknown>;
   prepareMarketRoute(order: TradingOrder, selected: readonly IndexedOrder[], maker: Address): Promise<unknown>;
+  prepareSwap(swap: Extract<TradingRequest, { readonly action: "prepareSwap" }>["swap"], maker: Address): Promise<unknown>;
   prepareCancellation(order: IndexedOrder, maker: Address): unknown;
   prepareWrappedNative(operation: "wrap" | "unwrap", amount: string, maker: Address): Promise<unknown>;
   queryBalances(tokens: readonly Address[], maker: Address, orders: readonly IndexedOrder[]): Promise<unknown>;

@@ -4,6 +4,8 @@ import type { AuthService, LedgerWebAuthnService, OAuthService } from "@aqua/ada
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { ActivityService } from "@aqua/activity";
 import type { TradingService } from "@aqua/orderbook";
+import { createQuoterRoutes } from "@aqua/quoter";
+import type { QuoterService } from "@aqua/quoter";
 import { z, ZodError } from "zod";
 import { docsHtml, openApiDocument } from "./openapi.ts";
 import { swaggerCssResponse, swaggerJavaScriptResponse } from "./swagger.ts";
@@ -15,6 +17,7 @@ export interface ServerDependencies {
   readonly activity: ActivityService;
   readonly webauthn: LedgerWebAuthnService;
   readonly oauth: OAuthService;
+  readonly quoter: QuoterService;
   readonly corsOrigin: string;
   readonly issuer: string;
   readonly resource: string;
@@ -33,7 +36,7 @@ const statusTitle = (status: number): string => ({
   400: "Bad Request", 401: "Unauthorized", 402: "Authorization Required", 403: "Forbidden", 404: "Not Found",
   405: "Method Not Allowed", 413: "Content Too Large", 415: "Unsupported Media Type",
   422: "Unprocessable Content", 429: "Too Many Requests", 500: "Internal Server Error",
-  502: "Bad Gateway", 504: "Gateway Timeout",
+  502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout",
 })[status] ?? "Request Failed";
 
 const requestIdLanguage = /^[A-Za-z0-9._:-]{1,128}$/u;
@@ -150,6 +153,11 @@ const execute = async (request: Request, action: () => Promise<Response>, corsOr
 
 export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve.Options<undefined> => ({
   routes: {
+    ...createQuoterRoutes({quoter:dependencies.quoter,boundary:{
+      execute:(request,action)=>execute(request,action,dependencies.corsOrigin),
+      parseJson,
+      authenticate:async(request,scope)=>{const principal=await bearer(request,dependencies.auth);requireScope(principal,scope);return principal;},
+    }}),
     "/.well-known/oauth-protected-resource": () => Response.json({resource:dependencies.resource,authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
     "/.well-known/oauth-authorization-server": () => Response.json({issuer:dependencies.issuer,authorization_endpoint:`${dependencies.issuer}/authorize`,token_endpoint:`${dependencies.issuer}/token`,registration_endpoint:`${dependencies.issuer}/register`,response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],code_challenge_methods_supported:["S256"],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
     "/authorize": new Response("<!doctype html><meta charset=utf-8><title>Ledger MCP sign-in</title><h1>Ledger MCP sign-in</h1><p>Use the Ledger Security Key app to approve this authorization request.</p><p>This endpoint is completed by the local MCP bridge through <code>/oauth/authorize/start</code> and <code>/oauth/authorize/complete</code>.</p>",{headers:{"content-type":"text/html; charset=utf-8","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'"}}),
@@ -170,7 +178,7 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
       apiStyle: "agent-first",
       amountLanguage: "canonical unsigned decimal string; no signs, exponent notation, separators, or leading zeroes",
       tradingEndpoint: "POST /v1/trading",
-      actions: ["createOrder", "amendOrder", "cancelOrders", "executeOrder", "batch", "query", "manageWrappedNative"],
+      actions: ["createOrder", "amendOrder", "cancelOrders", "executeOrder", "prepareSwap", "batch", "query", "manageWrappedNative"],
       orderKinds: ["market", "limit", "stopMarket", "stopLimit", "trailingStop", "takeProfitMarket", "takeProfitLimit", "oco", "bracket"],
       timeInForce: ["gtc", "gtd", "ioc", "fok"],
       fillPolicies: ["partial", "allOrNone"],
@@ -178,6 +186,8 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
       defaults: { marketTimeInForce: "ioc", slippageBps: "50", restingTimeInForce: "gtc", fillPolicy: "partial", postPolicy: "normal" },
       authorizationProfile: "aqua-intent-v1 challenge/retry; not x402 payment",
       chainSelection: "deployment-configured; chainId is never accepted in request bodies",
+      prices: { available: dependencies.quoter.pricesAvailable, provider: "1inch", endpoints: ["GET /v1/prices/address/:address", "GET /v1/prices/name/:name"] },
+      quoteEndpoint: "POST /v1/quotes/aqua",
       erc20Monitoring: {
         transport: "minute polling; no websocket", initialLookbackSeconds: 60,
         classifications: ["buy", "sell", "sent", "received", "minted", "burned", "selfTransfer"],
@@ -264,10 +274,15 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
   fetch(request) {
     const path = new URL(request.url).pathname;
     const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/v1/capabilities", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
-    const postPaths = new Set(["/register","/oauth/authorize/start","/oauth/authorize/complete","/token","/mcp","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/trading", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
+    const postPaths = new Set(["/register","/oauth/authorize/start","/oauth/authorize/complete","/token","/mcp","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/trading", "/v1/quotes/aqua", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
     if (/^\/v1\/erc20-monitor\/subscriptions\/0x[0-9a-fA-F]{40}$/u.test(path)) {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
       response.headers.set("allow", "DELETE");
+      return response;
+    }
+    if (/^\/v1\/prices\/(?:address|name)\/[^/]+$/u.test(path)) {
+      const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
+      response.headers.set("allow", "GET");
       return response;
     }
     if (getPaths.has(path) || postPaths.has(path)) {

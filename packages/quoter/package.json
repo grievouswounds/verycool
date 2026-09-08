@@ -1,0 +1,1 @@
+{"name":"@aqua/quoter","version":"0.1.0","private":true,"type":"module","exports":"./src/index.ts","scripts":{"build":"bun build src/index.ts --target=bun --outdir=dist","typecheck":"tsc --noEmit","lint":"eslint src test","test":"bun test --pass-with-no-tests test"}}

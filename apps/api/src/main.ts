@@ -5,6 +5,7 @@ import { ProtocolService } from "@aqua/contracts";
 import { initializeCubane, JsonRpcClient, hexToBytes, keccakHex } from "@aqua/evm";
 import { IntentAuthorizationService, TradingService } from "@aqua/orderbook";
 import { SecretBrokerClient } from "@aqua/security";
+import { currencySchema, OneInchPriceClient, QuoterService } from "@aqua/quoter";
 import { createServerOptions } from "./server.ts";
 
 const manifest=await loadRuntimeManifest(Bun.argv);
@@ -32,6 +33,10 @@ const protocol=new ProtocolService({
   limitSwapRouter:manifest.contracts.limitSwapRouter.address,
   wrappedNativeToken:manifest.contracts.wrappedNativeToken.address,
 },rpc);
+const oneInchApiKey=Bun.env["ONEINCH_API_KEY"]?.trim();
+const oneInchBaseUrl=new URL(Bun.env["ONEINCH_BASE_URL"]??"https://api.1inch.com");
+const oneInchDefaultCurrency=currencySchema.parse(Bun.env["ONEINCH_DEFAULT_CURRENCY"]??"USD");
+const quoter=new QuoterService({chainId:manifest.chain.id,defaultCurrency:oneInchDefaultCurrency,protocol,priceClient:oneInchApiKey===undefined||oneInchApiKey.length===0?null:new OneInchPriceClient({apiKey:oneInchApiKey,baseUrl:oneInchBaseUrl})});
 const activityRepository=new PostgresActivityRepository(database);
 await activityRepository.initialize();
 const activity=new ActivityService(activityRepository,new RpcActivityChain(rpc),BigInt(manifest.indexer.confirmations),defaults.activityMaxSubscriptionsPerUser);
@@ -52,7 +57,7 @@ const readiness=async():Promise<boolean>=>{
 };
 if(!await readiness())throw new Error("Startup validation failed: stale or inconsistent runtime manifest");
 const apiUrl=new URL(manifest.services.apiUrl);
-const options=createServerOptions({trading,auth,activity,webauthn,oauth,manifest,corsOrigin:manifest.auth.origin,readiness,issuer:manifest.auth.issuer,resource:manifest.auth.resource});
+const options=createServerOptions({trading,auth,activity,webauthn,oauth,quoter,manifest,corsOrigin:manifest.auth.origin,readiness,issuer:manifest.auth.issuer,resource:manifest.auth.resource});
 Object.assign(options,{hostname:"127.0.0.1",port:Number(apiUrl.port)});
 const server=Bun.serve(options);
 console.log(JSON.stringify({level:"info",message:"server started",url:server.url.toString(),chainId:manifest.chain.id,manifestHash:runtimeManifestHash(manifest)}));

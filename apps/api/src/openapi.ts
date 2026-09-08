@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   activityListQuerySchema, activityWipeSchema, challengeRequestSchema, sessionRequestSchema, subscriptionRequestSchema, tradingRequestSchema,
 } from "@aqua/core";
+import { aquaQuoteRequestSchema } from "@aqua/quoter";
 
 const schemaOf = (schema: z.ZodType): unknown => z.toJSONSchema(schema, { target: "draft-2020-12", io: "input" });
 const discriminatedSchemaOf = (schema: z.ZodType, propertyName: string): unknown => {
@@ -22,6 +23,8 @@ export const openApiDocument: Readonly<Record<string, unknown>> = {
     { name: "discovery", description: "Machine-readable capability and health discovery" },
     { name: "authentication", description: "SIWE session lifecycle" },
     { name: "trading", description: "One discriminated command/query surface for orders, execution, market data, and wrapped native assets" },
+    { name: "prices", description: "Authenticated 1inch token discovery and spot prices on the deployment chain" },
+    { name: "quotes", description: "Authenticated read-only Aqua order simulation" },
     { name: "erc20-monitor", description: "Polling-based ERC-20 Transfer monitoring owned by the authenticated wallet" },
   ],
   components: {
@@ -49,6 +52,7 @@ export const openApiDocument: Readonly<Record<string, unknown>> = {
       ActivitySubscriptionRequest: schemaOf(subscriptionRequestSchema),
       ActivityListQuery: schemaOf(activityListQuerySchema),
       ActivityWipeRequest: schemaOf(activityWipeSchema),
+      AquaQuoteRequest: schemaOf(aquaQuoteRequestSchema),
     },
   },
   paths: {
@@ -59,6 +63,11 @@ export const openApiDocument: Readonly<Record<string, unknown>> = {
     "/v1/auth/sessions": { post: operation("createAuthSession", "Verify SIWE and create a session", "SessionRequest", false, "authentication", { challengeId: "00000000-0000-4000-8000-000000000000", message: "Use the exact challenge message", signature: `0x${"00".repeat(65)}` }) },
     "/v1/auth/refresh": { post: { operationId: "refreshAuthSession", tags: ["authentication"], summary: "Rotate the refresh token", responses: okResponse() } },
     "/v1/trading": { post: tradingOperation() },
+    "/v1/prices/address/{address}": { get: priceOperation("getTokenPriceByAddress", "Look up a token spot price by address", "address") },
+    "/v1/prices/name/{name}": { get: priceOperation("getTokenPriceByName", "Resolve a token name or symbol and look up its spot price", "name") },
+    "/v1/quotes/aqua": { post: operation("quoteAquaOrder", "Quote one encoded Aqua order without preparing a transaction", "AquaQuoteRequest", true, "quotes", {
+      encodedOrder: "0x", tokenIn: "0x1111111111111111111111111111111111111111", tokenOut: "0x2222222222222222222222222222222222222222", amountIn: "1",
+    }) },
     "/v1/erc20-monitor/subscriptions": {
       get: securedReadOperation("listErc20MonitorSubscriptions", "List monitored addresses", "erc20-monitor"),
       post: operation("subscribeErc20Monitor", "Subscribe to confirmed ERC-20 activity", "ActivitySubscriptionRequest", true, "erc20-monitor", { address: "0x1111111111111111111111111111111111111111" }),
@@ -81,7 +90,7 @@ function okResponse(): Readonly<Record<string, unknown>> {
 
 function tradingOperation(): Readonly<Record<string, unknown>> {
   return {
-    operationId: "trade", tags: ["trading"], summary: "Create, amend, cancel, execute, batch, or query Aqua spot orders",
+    operationId: "trade", tags: ["trading"], summary: "Create, amend, cancel, quote/prepare swaps, execute, batch, or query Aqua spot orders",
     description: "Use the action discriminator first, then provide only fields belonging to that action. Public order-book, ticker, recent-trade, candle, and fee queries do not require authentication; personal queries and mutations do. Conditional and linked orders return an aqua-intent-v1 HTTP 402 challenge until the agent retries with a valid AQUA-AUTHORIZATION header. Prices are quote-token units per one base token and all numbers are decimal strings.",
     security: [{}, { bearerAuth: [] }],
     requestBody: {
@@ -99,6 +108,23 @@ function tradingOperation(): Readonly<Record<string, unknown>> {
       default: { description: "RFC 9457 problem", content: { "application/problem+json": { schema: { $ref: "#/components/schemas/Problem" } } } },
     },
     "x-agent-tool": { name: "aqua_trade", strict: true, guidance: "Choose exactly one action. Never calculate atomic token units; send human decimal strings." },
+  };
+}
+
+function priceOperation(operationId: string, summary: string, parameter: "address" | "name"): Readonly<Record<string, unknown>> {
+  return {
+    operationId, summary, tags: ["prices"], security: [{ bearerAuth: [] }],
+    parameters: [
+      { name: parameter, in: "path", required: true, schema: parameter === "address"
+        ? { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" }
+        : { type: "string", minLength: 1, maxLength: 64 } },
+      { name: "currency", in: "query", required: false, schema: { type: "string", pattern: "^[A-Z]{3,8}$", default: "USD" } },
+    ],
+    responses: {
+      "200": { description: "Spot price response with canonical decimal-string values" },
+      "503": { description: "ONEINCH_API_KEY is not configured" },
+      default: { description: "RFC 9457 problem response" },
+    },
   };
 }
 

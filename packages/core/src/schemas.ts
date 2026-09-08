@@ -140,6 +140,30 @@ const lifetimeSchema = unsignedIntegerStringSchema.refine(
   (value) => BigInt(value) >= 1n && BigInt(value) <= 31_536_000n,
   "Lifetime must be from 1 through 31536000 seconds",
 );
+const prepareSwapSchema = z.object({
+  routerKind: z.enum(["aquaAmm", "aquaLimit"]).default("aquaAmm"),
+  encodedOrder: hexSchema,
+  tokenIn: addressSchema,
+  tokenOut: addressSchema,
+  amountIn: positiveDecimalSchema.optional(),
+  amountOut: positiveDecimalSchema.optional(),
+  slippageBps: bpsSchema.default("50").transform((value) => Number(value)),
+  deadline: z.iso.datetime({ offset: true }).optional(),
+  lifetimeSeconds: lifetimeSchema.transform((value) => Number(value)).optional(),
+  recipient: addressSchema.optional(),
+  payWithNative: z.boolean().default(false),
+  receiveNative: z.boolean().default(false),
+}).strict().superRefine((value, context) => {
+  if (value.tokenIn === value.tokenOut) {
+    context.addIssue({ code: "custom", message: "tokenIn and tokenOut must differ", path: ["tokenOut"] });
+  }
+  if ((value.amountIn === undefined) === (value.amountOut === undefined)) {
+    context.addIssue({ code: "custom", message: "Provide exactly one of amountIn or amountOut", path: ["amountIn"] });
+  }
+  if (value.deadline !== undefined && value.lifetimeSeconds !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide deadline or lifetimeSeconds, not both", path: ["deadline"] });
+  }
+});
 const timeInForceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("gtc") }).strict(),
   z.object({ kind: z.literal("gtd"), expiresAt: z.iso.datetime({ offset: true }) }).strict(),
@@ -255,10 +279,11 @@ const queryCommandSchema = z.object({ action: z.literal("query"), query: querySc
 const wrappedNativeCommandSchema = z.object({
   action: z.literal("manageWrappedNative"), operation: z.enum(["wrap", "unwrap"]), amount: positiveDecimalSchema,
 }).strict();
+const prepareSwapCommandSchema = z.object({ action: z.literal("prepareSwap"), swap: prepareSwapSchema }).strict();
 
 export const tradingRequestSchema = z.discriminatedUnion("action", [
   createOrderCommandSchema, amendOrderCommandSchema, cancelOrdersCommandSchema, executeOrderCommandSchema,
-  batchCommandSchema, queryCommandSchema, wrappedNativeCommandSchema,
+  batchCommandSchema, queryCommandSchema, wrappedNativeCommandSchema, prepareSwapCommandSchema,
 ]);
 export type TradingRequest = z.infer<typeof tradingRequestSchema>;
 export type TradingOrder = z.infer<typeof tradingOrderSchema>;
