@@ -52,14 +52,21 @@ contract AquaOrderVaultFactory {
         address owner, address delegate, address token, uint128 maxPerOrder, uint128 maxPerDay,
         uint64 validUntil, bytes calldata signature
     ) external {
-        if (owner == address(0) || delegate == address(0) || token == address(0)
-            || maxPerOrder == 0 || maxPerDay < maxPerOrder || validUntil <= block.timestamp) revert InvalidPolicy();
+        if (
+            owner == address(0) || delegate == address(0) || token == address(0)
+            || maxPerOrder == 0 || maxPerDay < maxPerOrder
+            // forge-lint: disable-next-line(block-timestamp)
+            || validUntil <= block.timestamp
+        ) revert InvalidPolicy();
         uint256 nonce = delegationNonces[owner]++;
         bytes32 structHash = keccak256(abi.encode(
             DELEGATION_TYPEHASH, owner, delegate, token, maxPerOrder, maxPerDay, validUntil, nonce
         ));
+        // `_recover` only calls `ecrecover`, a precompile with no code of its own, so it
+        // cannot reenter and reorder the state write or event below.
         if (_recover(_digest(structHash), signature) != owner) revert Unauthorized();
         policies[_policyKey(owner, delegate, token)] = Policy(maxPerOrder, maxPerDay, validUntil, true);
+        // forge-lint: disable-next-line(reentrancy-events)
         emit DelegationRegistered(owner, delegate, token, validUntil);
     }
 
@@ -72,15 +79,26 @@ contract AquaOrderVaultFactory {
         address owner, address delegate, address aqua, address app, address sellToken, bytes32 salt
     ) external returns (AquaOrderVault vault) {
         _activePolicy(owner, delegate, sellToken);
+        // AquaOrderVault's constructor only stores its constructor arguments as immutables
+        // and makes no external calls, so it cannot reenter this factory; the vault's address
+        // is only known once `new` returns, so the state write and event must follow it.
         vault = new AquaOrderVault{salt: salt}(owner, delegate, aqua, app, sellToken);
         vaults[address(vault)] = true;
+        // forge-lint: disable-next-line(reentrancy-events)
         emit VaultDeployed(address(vault), owner, delegate, sellToken, salt);
     }
 
     function predictVault(
         address owner, address delegate, address aqua, address app, address sellToken, bytes32 salt
     ) external view returns (address) {
-        bytes32 initHash = keccak256(abi.encodePacked(
+        // This replicates the CREATE2 init-code-hash formula from EIP-1014
+        // (keccak256(creationCode ++ abi.encode(constructorArgs))) exactly, so that it matches
+        // the address Solidity derives for `new AquaOrderVault{salt}(...)` in deployVault
+        // above. bytes.concat performs the same raw concatenation as abi.encodePacked would
+        // here, without tripping the encodePacked hash-collision lint, which is aimed at
+        // encodePacked used to build a disambiguating identifier from unrelated fields rather
+        // than to reproduce a fixed, standard hash formula like this one.
+        bytes32 initHash = keccak256(bytes.concat(
             type(AquaOrderVault).creationCode, abi.encode(owner, delegate, aqua, app, sellToken)
         ));
         return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initHash)))));
@@ -89,6 +107,7 @@ contract AquaOrderVaultFactory {
     /// @dev request.action 0 activates, 1 amends, and 2 cancels.
     function execute(LifecycleRequest calldata request, bytes calldata signature) external {
         if (!vaults[address(request.vault)]) revert InvalidAction();
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > request.deadline) revert Expired();
         address delegate = request.vault.delegate();
         uint256 nonce = actionNonces[delegate]++;
@@ -96,7 +115,15 @@ contract AquaOrderVaultFactory {
             ACTION_TYPEHASH, address(request.vault), request.action, keccak256(request.strategy),
             keccak256(abi.encode(request.tokens)), keccak256(abi.encode(request.amounts)), nonce, request.deadline
         ));
+        // `_recover` only calls `ecrecover`, a precompile with no code of its own, so it cannot
+        // reenter and reorder the state or event below. `nonce` and `request.action` are
+        // already final at this point, so the event can safely be emitted before the vault
+        // calls further down without changing what it reports; if any branch reverts
+        // (including the invalid-action case) the emitted log is discarded along with the rest
+        // of the transaction, exactly as if it were emitted afterwards.
         if (_recover(_digest(structHash), signature) != delegate) revert Unauthorized();
+        // forge-lint: disable-next-line(reentrancy-events)
+        emit ActionExecuted(address(request.vault), request.action, nonce);
         if (request.action == 0 || request.action == 1) {
             if (request.amounts.length != 2) revert InvalidAction();
             uint256 oldAmount = request.vault.committedAmount();
@@ -110,7 +137,6 @@ contract AquaOrderVaultFactory {
         } else {
             revert InvalidAction();
         }
-        emit ActionExecuted(address(request.vault), request.action, nonce);
     }
 
     function _charge(address owner, address delegate, address token, uint256 orderAmount, uint256 increase) private {
@@ -118,15 +144,22 @@ contract AquaOrderVaultFactory {
         Policy memory policy = _activePolicy(owner, delegate, token);
         if (orderAmount > policy.maxPerOrder) revert PolicyExceeded();
         DailySpend storage spend = dailySpend[key];
+        // casting to 'uint64' is safe because block.timestamp / 1 days ("days since the Unix
+        // epoch") stays far below type(uint64).max for billions of years.
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint64 day = uint64(block.timestamp / 1 days);
         if (spend.day != day) { spend.day = day; spend.amount = 0; }
         uint256 next = uint256(spend.amount) + increase;
         if (next > policy.maxPerDay) revert PolicyExceeded();
+        // casting to 'uint192' is safe because the check immediately above guarantees
+        // next <= policy.maxPerDay, and policy.maxPerDay is a uint128, well within uint192.
+        // forge-lint: disable-next-line(unsafe-typecast)
         spend.amount = uint192(next);
     }
 
     function _activePolicy(address owner, address delegate, address token) private view returns (Policy memory policy) {
         policy = policies[_policyKey(owner, delegate, token)];
+        // forge-lint: disable-next-line(block-timestamp)
         if (!policy.active || policy.validUntil < block.timestamp) revert Expired();
     }
 

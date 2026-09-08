@@ -18,10 +18,10 @@ contract AquaIntentControllerTest {
         AquaIntentController controller = new AquaIntentController(address(this), 2, 30);
         bytes32 intent = bytes32(uint256(1));
         controller.observe(intent, bytes32(uint256(2)), true);
-        (uint64 timestamp,, bytes32 proof) = controller.observations(intent);
-        require(timestamp != 0 && proof != bytes32(0), "observation missing");
+        (uint64 timestamp, uint64 firstBlock, bytes32 proof) = controller.observations(intent);
+        require(timestamp != 0 && firstBlock != 0 && proof != bytes32(0), "observation missing");
         controller.observe(intent, bytes32(0), false);
-        (timestamp,, proof) = controller.observations(intent);
-        require(timestamp == 0 && proof == bytes32(0), "observation not reset");
+        (timestamp, firstBlock, proof) = controller.observations(intent);
+        require(timestamp == 0 && firstBlock == 0 && proof == bytes32(0), "observation not reset");
     }
 }

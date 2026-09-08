@@ -19,6 +19,9 @@ contracts/broadcast/
 contracts/coverage/
 contracts/lcov.info
 contracts/snapshots/
+ops/local-fixtures/cache/
+ops/local-fixtures/out/
+ops/local-fixtures/broadcast/
 typechain-types/
 
 # Local-chain deployments and generated runtime evidence

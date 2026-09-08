@@ -40,6 +40,9 @@ contract AquaOrderVaultTest {
         MockAquaOrderBook aqua = new MockAquaOrderBook();
         AquaOrderVaultFactory factory = new AquaOrderVaultFactory();
 
+        // casting to 'uint64' is safe because block.timestamp + 1 days stays far below
+        // type(uint64).max for billions of years.
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint64 validUntil = uint64(block.timestamp + 1 days);
         bytes32 delegation = keccak256(abi.encode(
             factory.DELEGATION_TYPEHASH(), owner, agent, address(token), uint256(100), uint256(200),
@@ -72,6 +75,9 @@ contract AquaOrderVaultTest {
 
         vm.prank(owner);
         vault.withdraw(address(token), owner, 100);
+        // MockVaultToken above is a fully deterministic in-memory mock controlled by this test,
+        // not an externally-influenced token, so an exact balance assertion is intentional here.
+        // forge-lint: disable-next-line(incorrect-strict-equality)
         require(token.balanceOf(owner) == 100, "owner did not recover funds");
     }
 

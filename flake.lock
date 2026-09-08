@@ -37,17 +37,19 @@
       "flake": false,
       "locked": {
         "lastModified": 1696001773,
-        "narHash": "sha256-sevmJhYn5/odTvS9si+KFw/R234KNaNfrnECdkVcL9w=",
-        "owner": "Uniswap",
-        "repo": "permit2",
+        "narHash": "sha256-4B6aUQQRzpLiaK1J9bCdB30FDXYc2paDWD9rS2YEuj0=",
+        "ref": "refs/heads/main",
         "rev": "cc56ad0f3439c502c246fc5cfcc3db92bb8b7219",
-        "type": "github"
+        "revCount": 184,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/Uniswap/permit2"
       },
       "original": {
-        "owner": "Uniswap",
-        "repo": "permit2",
         "rev": "cc56ad0f3439c502c246fc5cfcc3db92bb8b7219",
-        "type": "github"
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/Uniswap/permit2"
       }
     },
     "root": {
@@ -80,17 +82,19 @@
       "flake": false,
       "locked": {
         "lastModified": 1788812582,
-        "narHash": "sha256-JhCx3aU+kbIyBLTnZSNAP3nHK42DbN+9llhtYl3EfhQ=",
-        "owner": "x402-foundation",
-        "repo": "x402",
+        "narHash": "sha256-LQySSbWH5MaSt5gd0tDTcD+33IN+ccAHGVvWyfbMJoI=",
+        "ref": "refs/heads/main",
         "rev": "241df66079aa22d5572e940b2b5340b7a577963a",
-        "type": "github"
+        "revCount": 1208,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/x402-foundation/x402"
       },
       "original": {
-        "owner": "x402-foundation",
-        "repo": "x402",
         "rev": "241df66079aa22d5572e940b2b5340b7a577963a",
-        "type": "github"
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/x402-foundation/x402"
       }
     }
   },

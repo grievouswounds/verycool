@@ -54,60 +54,75 @@ contract AquaOrderVault {
     }
 
     function activate(bytes calldata strategy, address[] calldata tokens, uint256[] calldata amounts)
-        external onlyFactory nonReentrant
+        external nonReentrant onlyFactory
     {
         if (activeOrderHash != bytes32(0)) revert ActiveOrder();
         uint256 amount = _validate(strategy, tokens, amounts);
         if (IERC20VaultAsset(sellToken).balanceOf(address(this)) < amount) revert InsufficientFunding();
-        _approveAqua(amount);
-        aqua.ship(app, strategy, tokens, amounts);
-        activeOrderHash = keccak256(strategy);
+        bytes32 orderHash = keccak256(strategy);
+        activeOrderHash = orderHash;
         committedAmount = amount;
-        emit Activated(activeOrderHash, amount);
+        emit Activated(orderHash, amount);
+        _approveAqua(amount);
+        // nonReentrant already set `entered = true` before this function body started running,
+        // so a reentrant call back into any nonReentrant-guarded function reverts immediately
+        // regardless of statement order within the body.
+        // forge-lint: disable-next-line(reentrancy-no-eth)
+        aqua.ship(app, strategy, tokens, amounts);
     }
 
     function amend(bytes calldata strategy, address[] calldata tokens, uint256[] calldata amounts)
-        external onlyFactory nonReentrant
+        external nonReentrant onlyFactory
     {
         bytes32 previous = activeOrderHash;
         if (previous == bytes32(0)) revert InvalidOrder();
         uint256 amount = _validate(strategy, tokens, amounts);
         if (IERC20VaultAsset(sellToken).balanceOf(address(this)) < amount) revert InsufficientFunding();
+        bytes32 orderHash = keccak256(strategy);
+        activeOrderHash = orderHash;
+        committedAmount = amount;
+        emit Amended(previous, orderHash, amount);
+        // nonReentrant already set `entered = true` before this function body started running,
+        // so a reentrant call back into any nonReentrant-guarded function reverts immediately
+        // regardless of statement order within the body.
+        // forge-lint: disable-next-line(reentrancy-no-eth)
         aqua.dock(app, previous, tokens);
         _approveAqua(amount);
+        // forge-lint: disable-next-line(reentrancy-no-eth)
         aqua.ship(app, strategy, tokens, amounts);
-        activeOrderHash = keccak256(strategy);
-        committedAmount = amount;
-        emit Amended(previous, activeOrderHash, amount);
     }
 
-    function cancel(address[] calldata tokens) external onlyFactory nonReentrant {
+    function cancel(address[] calldata tokens) external nonReentrant onlyFactory {
         _cancel(tokens);
     }
 
-    function emergencyCancel(address[] calldata tokens) external onlyOwner nonReentrant {
+    function emergencyCancel(address[] calldata tokens) external nonReentrant onlyOwner {
         _cancel(tokens);
     }
 
-    function withdraw(address token, address recipient, uint256 amount) external onlyOwner nonReentrant {
+    function withdraw(address token, address recipient, uint256 amount) external nonReentrant onlyOwner {
         if (recipient == address(0)) revert InvalidOrder();
         uint256 balance = IERC20VaultAsset(token).balanceOf(address(this));
         if (token == sellToken && activeOrderHash != bytes32(0)) {
             uint256 available = balance > committedAmount ? balance - committedAmount : 0;
             if (available < amount) revert ActiveOrder();
         }
-        _safeTransfer(token, recipient, amount);
         emit Withdrawn(token, recipient, amount);
+        _safeTransfer(token, recipient, amount);
     }
 
     function _cancel(address[] calldata tokens) private {
         bytes32 current = activeOrderHash;
         if (current == bytes32(0)) revert InvalidOrder();
-        aqua.dock(app, current, tokens);
         activeOrderHash = bytes32(0);
         committedAmount = 0;
-        _approveAqua(0);
         emit Cancelled(current);
+        // Both callers of _cancel (cancel, emergencyCancel) carry the nonReentrant modifier,
+        // which already set `entered = true` before this function body started running, so a
+        // reentrant call back into any nonReentrant-guarded function reverts immediately.
+        // forge-lint: disable-next-line(reentrancy-no-eth)
+        aqua.dock(app, current, tokens);
+        _approveAqua(0);
     }
 
     function _validate(bytes calldata strategy, address[] calldata tokens, uint256[] calldata amounts)
@@ -128,6 +143,10 @@ contract AquaOrderVault {
     }
 
     function _safeTransfer(address token, address recipient, uint256 amount) private {
+        // `withdraw`, the only caller, carries the `nonReentrant` modifier, which sets
+        // `entered = true` before the function body (and therefore this call) runs; a
+        // reentrant call back into any nonReentrant-guarded function reverts immediately.
+        // forge-lint: disable-next-line(reentrancy-no-eth)
         (bool ok, bytes memory result) = token.call(abi.encodeCall(IERC20VaultAsset.transfer, (recipient, amount)));
         if (!ok || (result.length != 0 && !abi.decode(result, (bool)))) revert TransferFailed();
     }

@@ -79,6 +79,13 @@ const contract = (name: z.infer<typeof receiptNameSchema>) => {
   if (value === undefined) throw new Error(`Missing verified ${name} deployment`);
   return value;
 };
+// The manifest's own contract schema is address+runtimeCodeHash only (no blockNumber, which
+// exists solely to compute deploymentBlock below), so entries placed into `contracts:` must be
+// narrowed to those two fields or strict-schema validation rejects the extra property.
+const contractFields = (name: z.infer<typeof receiptNameSchema>) => {
+  const { address, runtimeCodeHash } = contract(name);
+  return { address, runtimeCodeHash };
+};
 const tokens = await Promise.all(input.tokenTransactions.map(async (transactionHash) => {
   const verified = await verifiedContract(transactionHash);
   const [decimals, symbol] = await Promise.all([rpc.tokenDecimals(verified.address), rpc.tokenSymbol(verified.address)]);
@@ -97,10 +104,10 @@ const base = {
   services: { databaseUrl: input.databaseUrl, apiUrl, mcpUrl: `${apiUrl}/mcp`, facilitatorUrl: `http://127.0.0.1:${String(input.facilitatorPort)}`, brokerSocket: input.brokerSocket },
   auth: { issuer: apiUrl, resource: `${apiUrl}/mcp`, rpId: "localhost", origin: apiUrl, pasetoPublicKeys: input.pasetoPublicKeys },
   contracts: {
-    aqua: contract("aqua"), aquaSwapRouter: contract("aquaSwapRouter"),
-    limitSwapRouter: contract("limitSwapRouter"), wrappedNativeToken: contract("wrappedNativeToken"),
-    intentController: contract("intentController"), orderVaultFactory: contract("orderVaultFactory"),
-    permit2: contract("permit2"), x402ExactPermit2Proxy: contract("x402ExactPermit2Proxy"),
+    aqua: contractFields("aqua"), aquaSwapRouter: contractFields("aquaSwapRouter"),
+    limitSwapRouter: contractFields("limitSwapRouter"), wrappedNativeToken: contractFields("wrappedNativeToken"),
+    intentController: contractFields("intentController"), orderVaultFactory: contractFields("orderVaultFactory"),
+    permit2: contractFields("permit2"), x402ExactPermit2Proxy: contractFields("x402ExactPermit2Proxy"),
   },
   fixtures: { tokens: tokens.map((token) => ({address:token.address,runtimeCodeHash:token.runtimeCodeHash,decimals:token.decimals,symbol:token.symbol})), pairs: [{ baseToken: firstToken.address, quoteToken: secondToken.address }] },
   indexer: { contracts: [contract("aqua").address, contract("aquaSwapRouter").address, contract("intentController").address], startBlock: deploymentBlock.toString(10), confirmations: 1 },

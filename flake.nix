@@ -2,13 +2,39 @@
   description = "Native Bun Aqua transaction-preparation backend";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.aqua = { url = "github:1inch/aqua/9c5c42e5840e8741fba3597c48456c9510212b66"; flake = false; };
-  inputs.swapvm = { url = "github:1inch/swap-vm/f09a41e689240adc645934f965c8061749397cd2"; flake = false; };
-  inputs.x402 = { url = "github:x402-foundation/x402/241df66079aa22d5572e940b2b5340b7a577963a"; flake = false; };
-  inputs.permit2 = { url = "github:Uniswap/permit2/cc56ad0f3439c502c246fc5cfcc3db92bb8b7219"; flake = false; };
+  inputs.aqua = {
+    url = "github:1inch/aqua/9c5c42e5840e8741fba3597c48456c9510212b66";
+    flake = false;
+  };
+  inputs.swapvm = {
+    url = "github:1inch/swap-vm/f09a41e689240adc645934f965c8061749397cd2";
+    flake = false;
+  };
+  inputs.x402 = {
+    # x402's own contracts/evm depends on forge-std/openzeppelin-contracts/permit2 as git
+    # submodules rather than npm packages. The "github:" shorthand fetches a plain source
+    # archive (GitHub's tarball API), which never contains submodule content no matter what
+    # query parameters are added; only the real git fetcher ("git+https://...") can check
+    # submodules out, via "submodules=1".
+    url = "git+https://github.com/x402-foundation/x402?rev=241df66079aa22d5572e940b2b5340b7a577963a&submodules=1";
+    flake = false;
+  };
+  inputs.permit2 = {
+    # Likewise, permit2 depends on forge-std/solmate/openzeppelin-contracts/forge-gas-snapshot
+    # as git submodules, which needs the same "git+https://...submodules=1" fetcher.
+    url = "git+https://github.com/Uniswap/permit2?rev=cc56ad0f3439c502c246fc5cfcc3db92bb8b7219&submodules=1";
+    flake = false;
+  };
 
   outputs =
-    { self, nixpkgs, aqua, swapvm, x402, permit2 }:
+    {
+      self,
+      nixpkgs,
+      aqua,
+      swapvm,
+      x402,
+      permit2,
+    }:
     let
       systems = [
         "aarch64-darwin"
@@ -53,7 +79,7 @@
           text = ''exec bun "$PWD/${source}" "$@"'';
         };
       devStack =
-        pkgs: aube:
+        pkgs: aube: aqua: swapvm: x402: permit2:
         let
           processComposeConfig = pkgs.writeText "aqua-process-compose.yaml" ''
             version: "0.5"
@@ -61,8 +87,18 @@
 
             processes:
               postgresql:
+                # The devShell shellHook already starts a persistent PostgreSQL for
+                # interactive use before "dev" gets a chance to run, so "nix develop -c dev"
+                # (and plain "dev" typed inside "nix develop") reach this with a server
+                # already listening on 5432. Starting a second postgres against the same
+                # data directory fails immediately (lock file postmaster.pid already
+                # exists), which was breaking "nix develop -c dev" entirely. Reuse the
+                # running server when there is one; "nix run .#dev", which bypasses the
+                # shellHook, still starts its own via the else branch.
                 command: >-
-                  postgres -D "$${AQUA_STATE_DIR}/postgresql"
+                  pg_isready -h 127.0.0.1 -p 5432 -d aqua_backend >/dev/null 2>&1 &&
+                  exec tail -f /dev/null ||
+                  exec postgres -D "$${AQUA_STATE_DIR}/postgresql"
                 readiness_probe:
                   exec:
                     command: pg_isready -h 127.0.0.1 -p 5432 -d aqua_backend
@@ -81,28 +117,103 @@
                   postgresql:
                     condition: process_healthy
 
+              anvil:
+                # A local chain for the protocol contracts api/activity-worker/order-worker all
+                # need a runtime manifest for. "--state" both loads and periodically dumps chain
+                # state, so a restarted "dev" reuses the same deployed contract addresses instead
+                # of orphaning the manifest generated on a previous run.
+                command: >-
+                  anvil --host 127.0.0.1 --port 8545 --chain-id 31337
+                  --state "$${AQUA_STATE_DIR}/anvil-state.json" --state-interval 5
+                readiness_probe:
+                  exec:
+                    command: cast chain-id --rpc-url "$${AQUA_LOCAL_RPC_URL}"
+                  initial_delay_seconds: 1
+                  period_seconds: 1
+                  timeout_seconds: 2
+                  success_threshold: 1
+                  failure_threshold: 30
+
+              secret-broker:
+                # Real, Ledger-backed mode only: "ledger-bootstrap" (run manually, once, with a
+                # physical Ledger connected) must already have produced an encrypted keyring at
+                # "$AQUA_STATE_DIR/keyring" before this can start. "--config" is only read lazily
+                # on the broker's first real signing request, so it is safe to point at a
+                # manifest that "manifest-generate" below has not written yet.
+                command: >-
+                  bun "$${AQUA_ROOT}/apps/secret-broker/src/main.ts"
+                  --socket "$${AQUA_STATE_DIR}/secret-broker.sock"
+                  --identity-out "$${AQUA_STATE_DIR}/identity.json"
+                  --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
+                  --ring-dir "$${AQUA_STATE_DIR}/keyring"
+                readiness_probe:
+                  exec:
+                    command: >-
+                      test -S "$${AQUA_STATE_DIR}/secret-broker.sock" &&
+                      test -f "$${AQUA_STATE_DIR}/identity.json"
+                  initial_delay_seconds: 1
+                  period_seconds: 1
+                  timeout_seconds: 2
+                  success_threshold: 1
+                  failure_threshold: 30
+
+              contracts-deploy:
+                # Deploys the Aqua/SwapVM/x402/Permit2 protocol stack plus fixture tokens to the
+                # local Anvil chain and writes deployments.json. Needs the broker's real keeper
+                # address (from identity.json) first, since AquaIntentController's immutable
+                # "operator" must be that address. Idempotent: reuses a prior deployment when
+                # Anvil's persisted state still has code at the recorded addresses.
+                command: bun "$${AQUA_ROOT}/scripts/deploy-local-chain.ts"
+                depends_on:
+                  anvil:
+                    condition: process_healthy
+                  secret-broker:
+                    condition: process_healthy
+
+              manifest-generate:
+                command: >-
+                  bun "$${AQUA_ROOT}/scripts/generate-local-manifest.ts"
+                  --rpc-url "$${AQUA_LOCAL_RPC_URL}"
+                  --deployments "$${AQUA_STATE_DIR}/deployments.json"
+                  --out "$${AQUA_STATE_DIR}/runtime-manifest.json"
+                depends_on:
+                  contracts-deploy:
+                    condition: process_completed_successfully
+
               api:
-                command: bun --hot "$${AQUA_ROOT}/apps/api/src/main.ts"
+                command: >-
+                  bun --hot "$${AQUA_ROOT}/apps/api/src/main.ts"
+                  --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
                 depends_on:
                   postgres-init:
+                    condition: process_completed_successfully
+                  manifest-generate:
                     condition: process_completed_successfully
                 availability:
                   restart: on_failure
                   backoff_seconds: 2
 
               activity-worker:
-                command: bun "$${AQUA_ROOT}/apps/worker/src/main.ts"
+                command: >-
+                  bun "$${AQUA_ROOT}/apps/worker/src/main.ts"
+                  --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
                 depends_on:
                   postgres-init:
+                    condition: process_completed_successfully
+                  manifest-generate:
                     condition: process_completed_successfully
                 availability:
                   restart: on_failure
                   backoff_seconds: 2
 
               order-worker:
-                command: bun "$${AQUA_ROOT}/apps/order-worker/src/main.ts"
+                command: >-
+                  bun "$${AQUA_ROOT}/apps/order-worker/src/main.ts"
+                  --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
                 depends_on:
                   postgres-init:
+                    condition: process_completed_successfully
+                  manifest-generate:
                     condition: process_completed_successfully
                 availability:
                   restart: on_failure
@@ -116,11 +227,26 @@
             pkgs.bun
             pkgs.postgresql_18
             pkgs.process-compose
+            pkgs.foundry
+            pkgs.openssl
           ];
           text = ''
             export AQUA_ROOT="$PWD"
+            # node_modules/.bin holds wallet-cli ("@ledgerhq/wallet-cli"), which secret-broker
+            # (real, non-fixture mode) shells out to. The devShell shellHook already prepends
+            # this for "nix develop -c dev"; setting it here too keeps "nix run .#dev" working
+            # the same way, matching how ledger-bootstrap already does this for itself.
+            export PATH="$PWD/node_modules/.bin:$PATH"
             export AQUA_STATE_DIR="''${AQUA_STATE_DIR:-$PWD/.data}"
             export DATABASE_URL="''${DATABASE_URL:-postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend}"
+            export AQUA_UPSTREAM=${aqua}
+            export SWAPVM_UPSTREAM=${swapvm}
+            export X402_UPSTREAM=${x402}
+            export PERMIT2_UPSTREAM=${permit2}
+            export AQUA_LOCAL_RPC_URL="''${AQUA_LOCAL_RPC_URL:-http://127.0.0.1:8545}"
+            export AQUA_BROKER_SOCKET="''${AQUA_BROKER_SOCKET:-$AQUA_STATE_DIR/secret-broker.sock}"
+            export AQUA_API_PORT="''${AQUA_API_PORT:-8787}"
+            export AQUA_FACILITATOR_PORT="''${AQUA_FACILITATOR_PORT:-8788}"
             if [ ! -d "$AQUA_STATE_DIR/postgresql" ]; then
               initdb -D "$AQUA_STATE_DIR/postgresql" --auth=trust
             fi
@@ -137,15 +263,26 @@
           api = appProgram pkgs "aqua-api" "apps/api/src/main.ts";
           worker = appProgram pkgs "aqua-activity-worker" "apps/worker/src/main.ts";
           orderWorker = appProgram pkgs "aqua-order-worker" "apps/order-worker/src/main.ts";
-          dev = devStack pkgs aube;
+          dev = devStack pkgs aube aqua swapvm x402 permit2;
           checkLocal = pkgs.writeShellApplication {
             name = "check-local";
-            runtimeInputs = [ aube pkgs.bun pkgs.foundry pkgs.git pkgs.jq pkgs.nix pkgs.postgresql_18 ];
+            runtimeInputs = [
+              aube
+              pkgs.bun
+              pkgs.foundry
+              pkgs.git
+              pkgs.jq
+              pkgs.nix
+              pkgs.postgresql_18
+            ];
             text = ''exec bash "$PWD/scripts/check-local.sh" "$@"'';
           };
           ledgerBootstrap = pkgs.writeShellApplication {
             name = "ledger-bootstrap";
-            runtimeInputs = [ pkgs.bun pkgs.openssl ];
+            runtimeInputs = [
+              pkgs.bun
+              pkgs.openssl
+            ];
             text = ''
               export PATH="$PWD/node_modules/.bin:$PATH"
               exec bash "$PWD/scripts/ledger-bootstrap.sh" "$@"
@@ -189,8 +326,14 @@
             type = "app";
             program = "${packages.order-worker}/bin/aqua-order-worker";
           };
-          check-local = { type = "app"; program = "${packages.checkLocal}/bin/check-local"; };
-          ledger-bootstrap = { type = "app"; program = "${packages.ledgerBootstrap}/bin/ledger-bootstrap"; };
+          check-local = {
+            type = "app";
+            program = "${packages.checkLocal}/bin/check-local";
+          };
+          ledger-bootstrap = {
+            type = "app";
+            program = "${packages.ledgerBootstrap}/bin/ledger-bootstrap";
+          };
         }
       );
 
@@ -217,7 +360,7 @@
         let
           pkgs = pkgsFor system;
           aube = aube171 pkgs;
-          dev = devStack pkgs aube;
+          dev = devStack pkgs aube aqua swapvm x402 permit2;
         in
         {
           default = pkgs.mkShell {

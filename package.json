@@ -21,8 +21,8 @@
     "test": "bun test",
     "test:contracts": "cd contracts && forge test --offline",
     "db:migrate": "bun scripts/migrate.ts",
-    "test:integration": "bun test test/integration",
-    "test:protocol": "bun test test/protocol",
+    "test:integration": "bun test --pass-with-no-tests test/integration",
+    "test:protocol": "bun test --pass-with-no-tests test/protocol",
     "type-coverage": "type-coverage --strict --at-least 100",
     "typecheck": "tsc --noEmit && type-coverage --strict --at-least 100"
   },

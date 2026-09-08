@@ -55,11 +55,17 @@ contract AquaIntentController {
     function consume(address maker, bytes32 commandHash, bytes32 nonce, uint256 validBefore, bytes calldata signature)
         external returns (bytes32 digest)
     {
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > validBefore) revert Expired();
         if (nonceUsed[maker][nonce]) revert Replay();
         digest = intentDigest(maker, commandHash, nonce, validBefore);
+        // Signature must be validated before the nonce can be marked used, so the external
+        // call in _validSignature (a STATICCALL for smart-contract wallets, which cannot
+        // itself mutate state or reenter) necessarily precedes both the state write and the
+        // event below.
         if (!_validSignature(maker, digest, signature)) revert Unauthorized();
         nonceUsed[maker][nonce] = true;
+        // forge-lint: disable-next-line(reentrancy-events)
         emit IntentConsumed(digest, maker, nonce);
     }
 
@@ -70,7 +76,11 @@ contract AquaIntentController {
             delete observations[intentHash];
             emit TriggerReset(intentHash);
         } else if (current.proofHash != proofHash) {
+            // block.timestamp and block.number are both far below type(uint64).max today and
+            // will remain so for billions of years; the cast cannot truncate in practice.
+            // forge-lint: disable-next-line(unsafe-typecast)
             observations[intentHash] = Observation(uint64(block.timestamp), uint64(block.number), proofHash);
+            // forge-lint: disable-next-line(unsafe-typecast)
             emit TriggerObserved(intentHash, proofHash, uint64(block.number), uint64(block.timestamp));
         }
     }
@@ -79,8 +89,11 @@ contract AquaIntentController {
         if (msg.sender != operator) revert Unauthorized();
         if (closedGroups[group]) revert GroupClosed();
         Observation memory current = observations[intentHash];
-        if (current.proofHash != proofHash || block.number < uint256(current.firstBlock) + minimumBlocks
-            || block.timestamp < uint256(current.firstTimestamp) + minimumDelay) revert TriggerNotPersistent();
+        if (
+            current.proofHash != proofHash || block.number < uint256(current.firstBlock) + minimumBlocks
+            // forge-lint: disable-next-line(block-timestamp)
+            || block.timestamp < uint256(current.firstTimestamp) + minimumDelay
+        ) revert TriggerNotPersistent();
         closedGroups[group] = true;
         delete observations[intentHash];
         emit TriggerActivated(intentHash, group);
@@ -89,8 +102,14 @@ contract AquaIntentController {
     function _validSignature(address signer, bytes32 digest, bytes calldata signature) private view returns (bool) {
         if (signer.code.length != 0) {
             (bool ok, bytes memory result) = signer.staticcall(
+                // casting to 'bytes4' is safe because a function selector is defined as the
+                // first 4 bytes of the keccak256 hash of its signature (ERC-165/ERC-1271 style).
+                // forge-lint: disable-next-line(unsafe-typecast)
                 abi.encodeWithSelector(bytes4(keccak256("isValidSignature(bytes32,bytes)")), digest, signature)
             );
+            // casting to 'bytes4' is safe because ERC-1271 defines the magic value as the
+            // first 4 bytes of the ABI-encoded return data, which is what is compared here.
+            // forge-lint: disable-next-line(unsafe-typecast)
             return ok && result.length >= 32 && bytes4(result) == 0x1626ba7e;
         }
         if (signature.length != 65) return false;
