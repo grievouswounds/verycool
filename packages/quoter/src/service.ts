@@ -46,6 +46,16 @@ export class QuoterService {
     return { chainId: String(this.chainId), address: address.data, symbol: token.symbol, name: token.name, decimals: String(token.decimals), currency, price };
   }
 
+  public async searchTokens(query: string) {
+    return this.prices().searchMany(this.chainId, query);
+  }
+
+  public async optionalPrice(address: Address, currency = this.defaultCurrencyValue): Promise<string | null> {
+    if (this.priceClient === null) return null;
+    try { return await this.priceClient.price(this.chainId, address, currency); }
+    catch { return null; }
+  }
+
   public quote(request: AquaQuoteRequest, taker: Address): Promise<DirectQuoteResult> {
     const input: DirectSwapRequest = {
       routerKind: request.routerKind, encodedOrder: request.encodedOrder,

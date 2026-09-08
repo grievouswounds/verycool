@@ -19,8 +19,8 @@ describe("local deployment policy", () => {
     const input = {
       schemaVersion: 1, profile: "local-anvil", runId: crypto.randomUUID(), createdAt: new Date().toISOString(),
       chain: { id: 31337, rpcUrl: "http://127.0.0.1:8545", genesisHash: `0x${"1".repeat(64)}`, deploymentBlock: "1" },
-      services: { databaseUrl: "postgresql://aqua@127.0.0.1/aqua", apiUrl: "http://localhost:8787", mcpUrl: "http://localhost:8787/mcp", facilitatorUrl: "http://localhost:8788", brokerSocket: "/tmp/aqua.sock" },
-      auth: { issuer: "http://localhost:8787", resource: "http://localhost:8787/mcp", rpId: "localhost", origin: "http://localhost:8787", pasetoPublicKeys: [`k4.public.${"a".repeat(43)}`] },
+      services: { databaseUrl: "postgresql://aqua@127.0.0.1/aqua", apiUrl: "http://localhost:8787", facilitatorUrl: "http://localhost:8788", brokerSocket: "/tmp/aqua.sock" },
+      auth: { issuer: "http://localhost:8787", resource: "http://localhost:8787", rpId: "localhost", origin: "http://localhost:8787", pasetoPublicKeys: [`k4.public.${"a".repeat(43)}`] },
       contracts: { aqua: contract("1"), aquaSwapRouter: contract("2"), limitSwapRouter: contract("3"), wrappedNativeToken: contract("4"), intentController: contract("5"), orderVaultFactory: contract("6"), boundedMatcher: contract("7"), permit2: contract("8"), x402ExactPermit2Proxy: contract("9") },
       fixtures: { tokens: [{ ...contract("a"), symbol: "aUSD", decimals: 6 }, { ...contract("b"), symbol: "aETH", decimals: 18 }], pairs: [{ baseToken: contract("a").address, quoteToken: contract("b").address }, { baseToken: contract("b").address, quoteToken: contract("a").address }] },
       indexer: { contracts: [contract("1").address], startBlock: "1", confirmations: 1 },

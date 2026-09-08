@@ -104,7 +104,7 @@ contract AquaOrderVaultFactory {
         return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initHash)))));
     }
 
-    /// @dev request.action 0 activates, 1 amends, and 2 cancels.
+    /// @dev request.action 0 activates, 1 amends, 2 cancels, and 3 performs one reviewed market swap.
     function execute(LifecycleRequest calldata request, bytes calldata signature) external {
         if (!vaults[address(request.vault)]) revert InvalidAction();
         // forge-lint: disable-next-line(block-timestamp)
@@ -134,6 +134,10 @@ contract AquaOrderVaultFactory {
             else request.vault.amend(request.strategy, request.tokens, request.amounts);
         } else if (request.action == 2) {
             request.vault.cancel(request.tokens);
+        } else if (request.action == 3) {
+            if (request.amounts.length != 2) revert InvalidAction();
+            _charge(request.vault.owner(), delegate, request.vault.sellToken(), request.amounts[1], request.amounts[1]);
+            request.vault.executeSwap(request.strategy, request.tokens, request.amounts);
         } else {
             revert InvalidAction();
         }

@@ -4,5 +4,9 @@ packages:
 strictDepBuilds: true
 allowBuilds:
   '@scarf/scarf': false
+  node-hid: true
+  usb: true
+
+
 patchedDependencies:
   '@hazae41/cubane@0.3.12': patches/@hazae41+cubane@0.3.12.patch

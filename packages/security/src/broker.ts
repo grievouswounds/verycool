@@ -24,7 +24,7 @@ export const brokerRequestSchema = z.discriminatedUnion("method", [
     vault: addressSchema, proxy: addressSchema, amount: z.string().regex(/^(?:0|[1-9][0-9]*)$/u),
     deadline: z.string().regex(/^(?:0|[1-9][0-9]*)$/u),
   }).strict() }).strict(),
-  z.object({id:identifier,method:z.literal("signEip1559"),params:z.object({chainId:z.string(),nonce:z.string(),maxPriorityFeePerGas:z.string(),maxFeePerGas:z.string(),gas:z.string(),to:addressSchema,value:z.string(),data:hexSchema}).strict()}).strict(),
+  z.object({id:identifier,method:z.literal("signEip1559"),params:z.object({purpose:z.enum(["keeper","facilitator"]),chainId:z.string(),nonce:z.string(),maxPriorityFeePerGas:z.string(),maxFeePerGas:z.string(),gas:z.string(),to:addressSchema,value:z.string(),data:hexSchema}).strict()}).strict(),
 ]);
 export type BrokerRequest = z.infer<typeof brokerRequestSchema>;
 export const brokerIdentitySchema = z.object({
@@ -74,5 +74,5 @@ export class SecretBrokerClient {
     const result = await this.request("issuePaseto", grant, z.object({ token: z.string().min(1) }).strict());
     return result.token;
   }
-  public async signEip1559(transaction:{readonly chainId:bigint;readonly nonce:bigint;readonly maxPriorityFeePerGas:bigint;readonly maxFeePerGas:bigint;readonly gas:bigint;readonly to:Address;readonly value:bigint;readonly data:Hex}):Promise<Hex>{const params={chainId:transaction.chainId.toString(),nonce:transaction.nonce.toString(),maxPriorityFeePerGas:transaction.maxPriorityFeePerGas.toString(),maxFeePerGas:transaction.maxFeePerGas.toString(),gas:transaction.gas.toString(),to:transaction.to,value:transaction.value.toString(),data:transaction.data};const result=await this.request("signEip1559",params,z.object({rawTransaction:hexSchema}).strict());return result.rawTransaction;}
+  public async signEip1559(transaction:{readonly chainId:bigint;readonly nonce:bigint;readonly maxPriorityFeePerGas:bigint;readonly maxFeePerGas:bigint;readonly gas:bigint;readonly to:Address;readonly value:bigint;readonly data:Hex},purpose:"keeper"|"facilitator"="keeper"):Promise<Hex>{const params={purpose,chainId:transaction.chainId.toString(),nonce:transaction.nonce.toString(),maxPriorityFeePerGas:transaction.maxPriorityFeePerGas.toString(),maxFeePerGas:transaction.maxFeePerGas.toString(),gas:transaction.gas.toString(),to:transaction.to,value:transaction.value.toString(),data:transaction.data};const result=await this.request("signEip1559",params,z.object({rawTransaction:hexSchema}).strict());return result.rawTransaction;}
 }

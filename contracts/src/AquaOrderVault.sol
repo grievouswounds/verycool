@@ -32,11 +32,13 @@ contract AquaOrderVault {
     error InsufficientFunding();
     error ActiveOrder();
     error TransferFailed();
+    error SwapFailed();
 
     event Activated(bytes32 indexed orderHash, uint256 committedAmount);
     event Amended(bytes32 indexed previousOrderHash, bytes32 indexed orderHash, uint256 committedAmount);
     event Cancelled(bytes32 indexed orderHash);
     event Withdrawn(address indexed token, address indexed recipient, uint256 amount);
+    event SwapExecuted(address indexed sellToken, address indexed buyToken, uint256 sellAmount, uint256 buyAmount);
 
     modifier onlyFactory() { if (msg.sender != factory) revert Unauthorized(); _; }
     modifier onlyOwner() { if (msg.sender != owner) revert Unauthorized(); _; }
@@ -96,6 +98,37 @@ contract AquaOrderVault {
         _cancel(tokens);
     }
 
+    /// @notice Executes exactly one Aqua swap calldata reviewed and signed by the delegate.
+    /// The immutable `app` is the only target, the sell approval is exact and cleared after
+    /// the call, and all measured output is transferred directly to the Ledger owner.
+    function executeSwap(bytes calldata callData, address[] calldata tokens, uint256[] calldata amounts)
+        external nonReentrant onlyFactory
+    {
+        if (activeOrderHash != bytes32(0) || tokens.length != 2 || amounts.length != 2
+            || tokens[1] != sellToken || tokens[0] == sellToken || amounts[0] == 0 || amounts[1] == 0
+            || callData.length < 4) revert InvalidOrder();
+        bytes4 reviewedSelector;
+        assembly ("memory-safe") { reviewedSelector := calldataload(callData.offset) }
+        if (reviewedSelector != bytes4(keccak256("swap((address,uint256,bytes),address,address,uint256,bytes)"))) {
+            revert InvalidOrder();
+        }
+        uint256 beforeOutput = IERC20VaultAsset(tokens[0]).balanceOf(address(this));
+        _safeApprove(sellToken, app, amounts[1]);
+        // The target and selector are both immutable/allowlisted above and nonReentrant is
+        // already active. A revert is propagated and therefore cannot leave partial state.
+        // forge-lint: disable-next-line(reentrancy-no-eth)
+        (bool ok, bytes memory result) = app.call(callData);
+        _safeApprove(sellToken, app, 0);
+        if (!ok) {
+            assembly ("memory-safe") { revert(add(result, 32), mload(result)) }
+        }
+        uint256 afterOutput = IERC20VaultAsset(tokens[0]).balanceOf(address(this));
+        if (afterOutput < beforeOutput || afterOutput - beforeOutput < amounts[0]) revert SwapFailed();
+        uint256 output = afterOutput - beforeOutput;
+        emit SwapExecuted(sellToken, tokens[0], amounts[1], output);
+        _safeTransfer(tokens[0], owner, output);
+    }
+
     function emergencyCancel(address[] calldata tokens) external nonReentrant onlyOwner {
         _cancel(tokens);
     }
@@ -138,7 +171,11 @@ contract AquaOrderVault {
     }
 
     function _approveAqua(uint256 amount) private {
-        (bool ok, bytes memory result) = sellToken.call(abi.encodeCall(IERC20VaultAsset.approve, (address(aqua), amount)));
+        _safeApprove(sellToken, address(aqua), amount);
+    }
+
+    function _safeApprove(address token, address spender, uint256 amount) private {
+        (bool ok, bytes memory result) = token.call(abi.encodeCall(IERC20VaultAsset.approve, (spender, amount)));
         if (!ok || (result.length != 0 && !abi.decode(result, (bool)))) revert TransferFailed();
     }
 

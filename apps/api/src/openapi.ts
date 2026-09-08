@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  activityListQuerySchema, activityWipeSchema, challengeRequestSchema, sessionRequestSchema, subscriptionRequestSchema, tradingRequestSchema,
+  activityListQuerySchema, activityWipeSchema, agentBindingRequestSchema, agentChallengeRequestSchema, challengeRequestSchema, delegationPreviewRequestSchema, delegationSubmitRequestSchema, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradePreviewRequestSchema, tradeSubmitRequestSchema, tradingRequestSchema,
 } from "@aqua/core";
 import { aquaQuoteRequestSchema } from "@aqua/quoter";
 
@@ -17,12 +17,13 @@ export const openApiDocument: Readonly<Record<string, unknown>> = {
   info: {
     title: "Aqua transaction preparation API",
     version: "1.0.0",
-    description: "Agent-first Aqua spot order-book API. POST /v1/trading is the only trading business endpoint. Every public number is a canonical decimal string and every transaction returned to an ordinary wallet is unsigned.",
+    description: "Ledger Key Ring trading API. Immutable trade previews are submitted through x402 exact Permit2 funding. The legacy /v1/trading command endpoint remains available for advanced REST workflows; MCP runs only as a local stdio bridge.",
   },
   tags: [
     { name: "discovery", description: "Machine-readable capability and health discovery" },
     { name: "authentication", description: "SIWE session lifecycle" },
     { name: "trading", description: "One discriminated command/query surface for orders, execution, market data, and wrapped native assets" },
+    { name: "trade-lifecycle", description: "Two-phase immutable preview, delegated approval, x402 funding, and trade feeds" },
     { name: "prices", description: "Authenticated 1inch token discovery and spot prices on the deployment chain" },
     { name: "quotes", description: "Authenticated read-only Aqua order simulation" },
     { name: "erc20-monitor", description: "Polling-based ERC-20 Transfer monitoring owned by the authenticated wallet" },
@@ -53,6 +54,13 @@ export const openApiDocument: Readonly<Record<string, unknown>> = {
       ActivityListQuery: schemaOf(activityListQuerySchema),
       ActivityWipeRequest: schemaOf(activityWipeSchema),
       AquaQuoteRequest: schemaOf(aquaQuoteRequestSchema),
+      TradePreviewRequest: schemaOf(tradePreviewRequestSchema),
+      TradeSubmitRequest: schemaOf(tradeSubmitRequestSchema),
+      AgentChallengeRequest: schemaOf(agentChallengeRequestSchema),
+      AgentBindingRequest: schemaOf(agentBindingRequestSchema),
+      DelegationPreviewRequest: schemaOf(delegationPreviewRequestSchema),
+      DelegationSubmitRequest: schemaOf(delegationSubmitRequestSchema),
+      SubscribedTradesWipeRequest: schemaOf(subscribedTradesWipeSchema),
     },
   },
   paths: {
@@ -63,6 +71,18 @@ export const openApiDocument: Readonly<Record<string, unknown>> = {
     "/v1/auth/sessions": { post: operation("createAuthSession", "Verify SIWE and create a session", "SessionRequest", false, "authentication", { challengeId: "00000000-0000-4000-8000-000000000000", message: "Use the exact challenge message", signature: `0x${"00".repeat(65)}` }) },
     "/v1/auth/refresh": { post: { operationId: "refreshAuthSession", tags: ["authentication"], summary: "Rotate the refresh token", responses: okResponse() } },
     "/v1/trading": { post: tradingOperation() },
+    "/v1/agents/me/challenges": { post: operation("createAgentBindingChallenge", "Create an EIP-712 proof-of-possession challenge for the local LKRP agent", "AgentChallengeRequest", true, "trade-lifecycle", { agent: "0x1111111111111111111111111111111111111111" }) },
+    "/v1/agents/me": { put: operation("bindAgent", "Bind the locally encrypted agent to the Ledger owner", "AgentBindingRequest", true, "trade-lifecycle", { challengeId: "00000000-0000-4000-8000-000000000000", agent: "0x1111111111111111111111111111111111111111", signature: `0x${"00".repeat(65)}` }) },
+    "/v1/delegations/previews": { post: operation("previewDelegation", "Prepare a bounded Ledger-owner delegation", "DelegationPreviewRequest", true, "trade-lifecycle", { agent: "0x1111111111111111111111111111111111111111", token: "0x2222222222222222222222222222222222222222", maxPerOrder: "1", maxPerDay: "1", expiresAt: "2027-01-01T00:00:00Z" }) },
+    "/v1/delegations": { post: operation("registerDelegation", "Relay a Ledger-signed bounded delegation", "DelegationSubmitRequest", true, "trade-lifecycle", { previewId: "00000000-0000-4000-8000-000000000000", previewHash: `0x${"00".repeat(32)}`, ownerSignature: `0x${"00".repeat(65)}` }) },
+    "/v1/trade-previews": { post: operation("requestTrade", "Resolve, quote, classify, and simulate an immutable trade", "TradePreviewRequest", true, "trade-lifecycle", { sellToken: { type: "native" }, buyToken: { type: "search", query: "USDC" }, amount: { side: "sell", value: "1" }, policy: { kind: "market", slippageBps: "50", timeInForce: "ioc" } }) },
+    "/v1/trades": {
+      get: { ...securedReadOperation("getTrades", "Read own and/or subscribed trades with cursor pagination", "trade-lifecycle"), parameters: tradeQueryParameters() },
+      post: { ...operation("postTrade", "Submit an exact reviewed preview; initial request returns x402 v2 PAYMENT-REQUIRED", "TradeSubmitRequest", true, "trade-lifecycle", { previewId: "00000000-0000-4000-8000-000000000000", previewHash: `0x${"00".repeat(32)}`, lifecycleSignature: `0x${"00".repeat(65)}` }), parameters: [{ name: "Idempotency-Key", in: "header", required: true, schema: { type: "string", format: "uuid" } }] },
+    },
+    "/v1/trade-subscriptions": { post: operation("subscribeToUser", "Subscribe to confirmed wallet trades", "ActivitySubscriptionRequest", true, "trade-lifecycle", { address: "0x1111111111111111111111111111111111111111" }) },
+    "/v1/trade-subscriptions/{address}": { delete: { operationId: "unsubscribeFromUser", tags: ["trade-lifecycle"], summary: "Stop collecting a wallet without deleting stored trades", security: [{ bearerAuth: [] }], parameters: [{ name: "address", in: "path", required: true, schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } }], responses: okResponse() } },
+    "/v1/trade-subscriptions/trades/wipe": { post: operation("wipeSubscribedTrades", "Delete subscribed trade projections without removing subscriptions", "SubscribedTradesWipeRequest", true, "trade-lifecycle", { scope: "address", address: "0x1111111111111111111111111111111111111111" }) },
     "/v1/prices/address/{address}": { get: priceOperation("getTokenPriceByAddress", "Look up a token spot price by address", "address") },
     "/v1/prices/name/{name}": { get: priceOperation("getTokenPriceByName", "Resolve a token name or symbol and look up its spot price", "name") },
     "/v1/quotes/aqua": { post: operation("quoteAquaOrder", "Quote one encoded Aqua order without preparing a transaction", "AquaQuoteRequest", true, "quotes", {
@@ -144,6 +164,17 @@ function activityQueryParameters(): readonly Readonly<Record<string, unknown>>[]
     { name: "to", in: "query", schema: { type: "string", format: "date-time" } },
     { name: "cursor", in: "query", schema: { type: "string", pattern: "^[A-Za-z0-9_-]{1,512}$" } },
     { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
+  ];
+}
+
+function tradeQueryParameters(): readonly Readonly<Record<string, unknown>>[] {
+  return [
+    { name: "source", in: "query", schema: { type: "string", enum: ["own", "subscriptions", "all"], default: "own" } },
+    { name: "status", in: "query", schema: { type: "string" } }, { name: "address", in: "query", schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } },
+    { name: "token", in: "query", schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } }, { name: "kind", in: "query", schema: { type: "string" } },
+    { name: "from", in: "query", schema: { type: "string", format: "date-time" } }, { name: "to", in: "query", schema: { type: "string", format: "date-time" } },
+    { name: "sort", in: "query", schema: { type: "string", enum: ["occurredAt", "updatedAt"], default: "occurredAt" } }, { name: "direction", in: "query", schema: { type: "string", enum: ["asc", "desc"], default: "desc" } },
+    { name: "cursor", in: "query", schema: { type: "string" } }, { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
   ];
 }
 

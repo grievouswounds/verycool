@@ -4,6 +4,7 @@ export const selectors = {
   "approve(address,uint256)": "0x095ea7b3",
   "decimals()": "0x313ce567",
   "symbol()": "0x95d89b41",
+  "name()": "0x06fdde03",
   "deposit()": "0xd0e30db0",
   "withdraw(uint256)": "0x2e1a7d4d",
   "isValidSignature(bytes32,bytes)": "0x1626ba7e",
@@ -11,4 +12,6 @@ export const selectors = {
   "swap((address,uint256,bytes),address,address,uint256,bytes)": "0xf4d2d412",
   "ship(address,bytes,address[],uint256[])": "0xf50b870f",
   "dock(address,bytes32,address[])": "0x28defc17",
+  "delegationNonces(address)": "0x03c8a3c6",
+  "registerDelegation(address,address,address,uint128,uint128,uint64,bytes)": "0xeeabec06",
 } as const;

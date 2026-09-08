@@ -1,18 +1,20 @@
-import { activityListQuerySchema, activityWipeSchema, addressSchema, AppError, challengeRequestSchema, parseStrictJson, sessionRequestSchema, subscriptionRequestSchema, tradingRequestSchema } from "@aqua/core";
-import type { AuthenticatedPrincipal, AuthenticationScope, RuntimeManifest } from "@aqua/core";
+import { activityListQuerySchema, activityWipeSchema, addressSchema, agentBindingRequestSchema, agentChallengeRequestSchema, AppError, challengeRequestSchema, delegationPreviewRequestSchema, delegationSubmitRequestSchema, hashSchema, parseStrictJson, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradePreviewRequestSchema, tradesListQuerySchema, tradeSubmitRequestSchema, tradingRequestSchema } from "@aqua/core";
+import type { AuthenticatedPrincipal, AuthenticationScope, Hash, RuntimeManifest } from "@aqua/core";
 import type { AuthService, LedgerWebAuthnService, OAuthService } from "@aqua/adapters";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { ActivityService } from "@aqua/activity";
 import type { TradingService } from "@aqua/orderbook";
+import type { TradeApiService } from "@aqua/trade-api";
+import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
 import { createQuoterRoutes } from "@aqua/quoter";
 import type { QuoterService } from "@aqua/quoter";
 import { z, ZodError } from "zod";
 import { docsHtml, openApiDocument } from "./openapi.ts";
 import { swaggerCssResponse, swaggerJavaScriptResponse } from "./swagger.ts";
-import { handleMcp } from "./mcp.ts";
 
 export interface ServerDependencies {
   readonly trading: TradingService;
+  readonly tradeApi: TradeApiService;
   readonly auth: AuthService;
   readonly activity: ActivityService;
   readonly webauthn: LedgerWebAuthnService;
@@ -64,6 +66,13 @@ const parseJson = async (request: Request): Promise<unknown> => {
   catch { throw new AppError(400, "urn:aqua:error:json", "Malformed JSON body"); }
 };
 
+const prerequisiteTransactions = (request: Request): readonly Hash[] => {
+  const header = request.headers.get("aqua-prerequisite-transactions");
+  if (header === null) return [];
+  try { return z.array(hashSchema).max(2).parse(JSON.parse(Buffer.from(header, "base64url").toString("utf8"))); }
+  catch { throw new AppError(422, "urn:aqua:error:prerequisite-transactions", "Aqua-Prerequisite-Transactions must be a base64url JSON array of at most two transaction hashes"); }
+};
+
 const parseActivityQuery = (request: Request) => {
   const allowed = new Set(["address", "classification", "from", "to", "cursor", "limit"]);
   const parameters = new URL(request.url).searchParams;
@@ -97,6 +106,21 @@ const requireScope = (principal: AuthenticatedPrincipal, scope: AuthenticationSc
     throw new AppError(403, "urn:aqua:error:scope", `Required scope: ${scope}`, { requiredScope: scope });
   }
 };
+const requireHardware = (principal: AuthenticatedPrincipal): void => {
+  if (!principal.authenticationMethods?.has("fido2") || !principal.authenticationMethods.has("hwk")) {
+    throw new AppError(403, "urn:aqua:error:amr", "Ledger FIDO2 hardware authentication is required");
+  }
+};
+
+const parseTradesQuery = (request: Request) => {
+  const allowed = new Set(["source", "status", "address", "token", "kind", "from", "to", "sort", "direction", "cursor", "limit"]);
+  const parameters = new URL(request.url).searchParams; const value: Record<string, string> = {};
+  for (const key of parameters.keys()) {
+    if (!allowed.has(key) || parameters.getAll(key).length !== 1) throw new AppError(422, "urn:aqua:error:query", `Invalid query parameter: ${key}`);
+    const item = parameters.get(key); if (item !== null) value[key] = item;
+  }
+  return tradesListQuerySchema.parse(value);
+};
 
 const cookie = (request: Request, name: string): string | null => {
   const values = request.headers.get("cookie")?.split(";") ?? [];
@@ -114,6 +138,27 @@ const webauthnFinishAuthenticationSchema=z.object({id:z.uuid(),response:authenti
 const oauthStartSchema=z.object({address:addressSchema,authorization:z.object({client_id:z.string(),redirect_uri:z.url(),resource:z.url(),scope:z.string(),state:z.string(),code_challenge:z.string(),code_challenge_method:z.literal("S256"),response_type:z.literal("code")}).strict()}).strict();
 const oauthCompleteSchema=z.object({id:z.uuid(),response:authenticationResponseSchema}).strict();
 const form=async(request:Request):Promise<URLSearchParams>=>{const media=request.headers.get("content-type")?.split(";",1)[0]?.trim();if(media!=="application/x-www-form-urlencoded")throw new AppError(415,"invalid_request","OAuth token requests must be form encoded");const text=await request.text();if(text.length>16_384)throw new AppError(413,"invalid_request","OAuth form is too large");return new URLSearchParams(text);};
+const authorizeHtml = `<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ledger MCP sign-in</title>
+<style>body{font:16px system-ui;max-width:38rem;margin:4rem auto;padding:0 1rem;color:#171717}form{display:grid;gap:1rem}input,button{font:inherit;padding:.75rem}button{cursor:pointer}#status{min-height:1.5rem;color:#444}</style>
+<h1>Ledger MCP sign-in</h1><p>Enter the Ethereum address enrolled with your Ledger FIDO2 credential, then approve the request on the Ledger Security Key app.</p>
+<form id="authorize"><label>Ledger owner address <input id="address" required pattern="0x[0-9a-fA-F]{40}" autocomplete="username"></label><button>Authorize Aqua MCP</button><output id="status"></output></form>
+<script>
+const form=document.querySelector('#authorize'),status=document.querySelector('#status'),button=form.querySelector('button');
+const fromBase64url=value=>Uint8Array.from(atob(value.replace(/-/g,'+').replace(/_/g,'/')),character=>character.charCodeAt(0)).buffer;
+const toBase64url=value=>btoa(String.fromCharCode(...new Uint8Array(value))).replace(/[+]/g,'-').replace(/[/]/g,'_').replace(/=+$/g,'');
+const query=new URLSearchParams(location.search);
+form.addEventListener('submit',async event=>{event.preventDefault();button.disabled=true;status.textContent='Waiting for Ledger…';try{
+  const authorization={};for(const name of ['client_id','redirect_uri','resource','scope','state','code_challenge','code_challenge_method','response_type']){const value=query.get(name);if(value===null)throw new Error('Missing OAuth parameter: '+name);authorization[name]=value;}
+  const started=await fetch('/oauth/authorize/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({address:document.querySelector('#address').value,authorization})});
+  const ceremony=await started.json();if(!started.ok)throw new Error(ceremony.detail||'Could not start Ledger authorization');
+  const publicKey=ceremony.options;publicKey.challenge=fromBase64url(publicKey.challenge);publicKey.allowCredentials=publicKey.allowCredentials.map(item=>({...item,id:fromBase64url(item.id)}));
+  const credential=await navigator.credentials.get({publicKey});if(!(credential instanceof PublicKeyCredential))throw new Error('Ledger did not return a WebAuthn credential');
+  const response={id:credential.id,rawId:toBase64url(credential.rawId),type:credential.type,authenticatorAttachment:credential.authenticatorAttachment,clientExtensionResults:credential.getClientExtensionResults(),response:{clientDataJSON:toBase64url(credential.response.clientDataJSON),authenticatorData:toBase64url(credential.response.authenticatorData),signature:toBase64url(credential.response.signature),userHandle:credential.response.userHandle===null?null:toBase64url(credential.response.userHandle)}};
+  const completed=await fetch('/oauth/authorize/complete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:ceremony.id,response})});const result=await completed.json();if(!completed.ok)throw new Error(result.detail||'Ledger authorization failed');location.assign(result.redirect_uri);
+}catch(error){status.textContent=error instanceof Error?error.message:'Ledger authorization failed';button.disabled=false;}});
+</script></html>`;
 
 export const authenticationChallenge = (error: AppError): string | null => {
   if (error.status === 401 && error.type === "urn:aqua:error:authentication") {
@@ -160,12 +205,11 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
     }}),
     "/.well-known/oauth-protected-resource": () => Response.json({resource:dependencies.resource,authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
     "/.well-known/oauth-authorization-server": () => Response.json({issuer:dependencies.issuer,authorization_endpoint:`${dependencies.issuer}/authorize`,token_endpoint:`${dependencies.issuer}/token`,registration_endpoint:`${dependencies.issuer}/register`,response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],code_challenge_methods_supported:["S256"],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
-    "/authorize": new Response("<!doctype html><meta charset=utf-8><title>Ledger MCP sign-in</title><h1>Ledger MCP sign-in</h1><p>Use the Ledger Security Key app to approve this authorization request.</p><p>This endpoint is completed by the local MCP bridge through <code>/oauth/authorize/start</code> and <code>/oauth/authorize/complete</code>.</p>",{headers:{"content-type":"text/html; charset=utf-8","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'"}}),
+    "/authorize": new Response(authorizeHtml,{headers:{"content-type":"text/html; charset=utf-8","content-security-policy":"default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'","referrer-policy":"no-referrer","x-content-type-options":"nosniff"}}),
     "/register": {POST:(request)=>execute(request,async()=>Response.json(await dependencies.oauth.register(await parseJson(request)),{status:201}),dependencies.corsOrigin)},
     "/oauth/authorize/start": {POST:(request)=>execute(request,async()=>{const input=oauthStartSchema.parse(await parseJson(request));const ceremony=await dependencies.webauthn.authenticationOptions(input.address);await dependencies.oauth.begin(input.address,input.authorization,ceremony.id);return Response.json(ceremony);},dependencies.corsOrigin)},
     "/oauth/authorize/complete": {POST:(request)=>execute(request,async()=>{const input=oauthCompleteSchema.parse(await parseJson(request));const assertion=await dependencies.webauthn.authenticate(input.id,input.response);return Response.json({redirect_uri:await dependencies.oauth.complete(input.id,assertion.owner)});},dependencies.corsOrigin)},
     "/token": {POST:(request)=>execute(request,async()=>{const input=await form(request);const grant=input.get("grant_type");const clientId=input.get("client_id")??"";const resource=input.get("resource")??"";if(grant==="authorization_code")return Response.json(await dependencies.oauth.exchangeCode(input.get("code")??"",clientId,input.get("redirect_uri")??"",resource,input.get("code_verifier")??""));if(grant==="refresh_token")return Response.json(await dependencies.oauth.refresh(input.get("refresh_token")??"",clientId,resource));throw new AppError(400,"unsupported_grant_type","Only authorization_code and refresh_token are accepted");},dependencies.corsOrigin)},
-    "/mcp": {POST:(request)=>handleMcp(request,dependencies.manifest,(token)=>dependencies.auth.authenticate(token))},
     "/health/live": new Response("ok", { headers: { "content-type": "text/plain" } }),
     "/health/ready": async () => (await dependencies.readiness())
       ? Response.json({ status: "ready" })
@@ -177,7 +221,9 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
     "/v1/capabilities": () => Response.json({
       apiStyle: "agent-first",
       amountLanguage: "canonical unsigned decimal string; no signs, exponent notation, separators, or leading zeroes",
-      tradingEndpoint: "POST /v1/trading",
+      tradingEndpoint: "POST /v1/trade-previews then POST /v1/trades",
+      mcpTransport: "local stdio bridge; no remote /mcp endpoint",
+      mcpTools: ["request_trade","post_trade","get_trades","subscribe_to_user","unsubscribe_from_user","wipe_subscribed_trades"],
       actions: ["createOrder", "amendOrder", "cancelOrders", "executeOrder", "prepareSwap", "batch", "query", "manageWrappedNative"],
       orderKinds: ["market", "limit", "stopMarket", "stopLimit", "trailingStop", "takeProfitMarket", "takeProfitLimit", "oco", "bracket"],
       timeInForce: ["gtc", "gtd", "ioc", "fok"],
@@ -270,15 +316,70 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
         return response;
       }, dependencies.corsOrigin),
     },
+    "/v1/agents/me/challenges": { POST: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+      const input = agentChallengeRequestSchema.parse(await parseJson(request));
+      return Response.json(await dependencies.tradeApi.createAgentChallenge(principal.address, input.agent), { status: 201 });
+    }, dependencies.corsOrigin) },
+    "/v1/agents/me": { PUT: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+      const input = agentBindingRequestSchema.parse(await parseJson(request));
+      return Response.json(await dependencies.tradeApi.bindAgent(principal.address, input.challengeId, input.agent, input.signature));
+    }, dependencies.corsOrigin) },
+    "/v1/delegations/previews": { POST: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+      return Response.json(await dependencies.tradeApi.createDelegationPreview(principal.address, delegationPreviewRequestSchema.parse(await parseJson(request))), { status: 201 });
+    }, dependencies.corsOrigin) },
+    "/v1/delegations": { POST: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+      return Response.json(await dependencies.tradeApi.submitDelegation(principal.address, delegationSubmitRequestSchema.parse(await parseJson(request))), { status: 202 });
+    }, dependencies.corsOrigin) },
+    "/v1/trade-previews": { POST: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+      const result = await dependencies.tradeApi.createPreview(tradePreviewRequestSchema.parse(await parseJson(request)), principal);
+      return Response.json(result.body, { status: result.status });
+    }, dependencies.corsOrigin) },
+    "/v1/trades": {
+      GET: (request) => execute(request, async () => {
+        const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:read"); requireHardware(principal);
+        return Response.json(await dependencies.tradeApi.listTrades(parseTradesQuery(request), principal.address));
+      }, dependencies.corsOrigin),
+      POST: (request) => execute(request, async () => {
+        const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+        const input = tradeSubmitRequestSchema.parse(await parseJson(request));
+        if (request.headers.get("idempotency-key") !== input.previewId) throw new AppError(422, "urn:aqua:error:idempotency", "Idempotency-Key must equal previewId");
+        const result = await dependencies.tradeApi.submit(input, principal, request.headers.get("payment-signature") ?? request.headers.get("x-payment"), prerequisiteTransactions(request));
+        const response = Response.json(result.body, { status: result.status });
+        if (result.paymentRequired !== undefined) response.headers.set("payment-required", encodePaymentRequiredHeader(result.paymentRequired));
+        if (result.paymentResponse !== undefined) response.headers.set("payment-response", encodePaymentResponseHeader(result.paymentResponse));
+        return response;
+      }, dependencies.corsOrigin),
+    },
+    "/v1/trade-subscriptions": { POST: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "activity:write"); requireHardware(principal);
+      const input = subscriptionRequestSchema.parse(await parseJson(request)); return Response.json(await dependencies.activity.subscribe(input.address, principal));
+    }, dependencies.corsOrigin) },
+    "/v1/trade-subscriptions/:address": { DELETE: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "activity:write"); requireHardware(principal);
+      return Response.json({ removed: await dependencies.activity.unsubscribe(addressSchema.parse(request.params["address"]), principal) });
+    }, dependencies.corsOrigin) },
+    "/v1/trade-subscriptions/trades/wipe": { POST: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "activity:write"); requireHardware(principal);
+      return Response.json(await dependencies.tradeApi.wipeSubscribed(subscribedTradesWipeSchema.parse(await parseJson(request)), principal.address));
+    }, dependencies.corsOrigin) },
   },
   fetch(request) {
     const path = new URL(request.url).pathname;
-    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/v1/capabilities", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
-    const postPaths = new Set(["/register","/oauth/authorize/start","/oauth/authorize/complete","/token","/mcp","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/trading", "/v1/quotes/aqua", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
+    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/v1/capabilities", "/v1/trades", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
+    const postPaths = new Set(["/register","/oauth/authorize/start","/oauth/authorize/complete","/token","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/agents/me/challenges", "/v1/delegations/previews", "/v1/delegations", "/v1/trade-previews", "/v1/trades", "/v1/trade-subscriptions", "/v1/trade-subscriptions/trades/wipe", "/v1/trading", "/v1/quotes/aqua", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
     if (/^\/v1\/erc20-monitor\/subscriptions\/0x[0-9a-fA-F]{40}$/u.test(path)) {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
       response.headers.set("allow", "DELETE");
       return response;
+    }
+    if (/^\/v1\/trade-subscriptions\/0x[0-9a-fA-F]{40}$/u.test(path) || path === "/v1/agents/me") {
+      const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
+      response.headers.set("allow", path === "/v1/agents/me" ? "PUT" : "DELETE"); return response;
     }
     if (/^\/v1\/prices\/(?:address|name)\/[^/]+$/u.test(path)) {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));

@@ -1,10 +1,11 @@
 import { selector } from "@aqua/evm";
 
 const signatures = [
-  "allowance(address,address)", "approve(address,uint256)", "decimals()", "symbol()", "deposit()", "withdraw(uint256)",
+  "allowance(address,address)", "approve(address,uint256)", "decimals()", "symbol()", "name()", "deposit()", "withdraw(uint256)",
   "isValidSignature(bytes32,bytes)", "quote((address,uint256,bytes),address,address,uint256,bytes)",
   "swap((address,uint256,bytes),address,address,uint256,bytes)", "ship(address,bytes,address[],uint256[])",
   "dock(address,bytes32,address[])",
+  "delegationNonces(address)", "registerDelegation(address,address,address,uint128,uint128,uint64,bytes)",
 ] as const;
 
 const rows = signatures.map((signature) => `  ${JSON.stringify(signature)}: ${JSON.stringify(selector(signature))},`).join("\n");

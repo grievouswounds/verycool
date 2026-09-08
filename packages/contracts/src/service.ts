@@ -27,6 +27,8 @@ export interface DirectSwapResult {
   readonly approval?: UnsignedTransaction;
   readonly preTransactions: readonly UnsignedTransaction[];
   readonly tokenDecimals: { readonly tokenIn: number; readonly tokenOut: number };
+  readonly requiredInputUnits: string;
+  readonly minimumOutputUnits: string;
 }
 
 export interface DirectQuoteResult {
@@ -155,7 +157,9 @@ export class ProtocolService {
     });
     const data = encodeSwapVmCall("swap", context.order, input.tokenIn, input.tokenOut, context.requested, finalTraits);
     const value = 0n;
-    const gas = await this.rpc.estimateGas({ from: principal.address, to: context.router, data, value: quantityToHex(value) });
+    let gas: bigint | undefined;
+    try { gas = await this.rpc.estimateGas({ from: principal.address, to: context.router, data, value: quantityToHex(value) }); }
+    catch { gas = undefined; }
     const requiredInput = context.exactIn ? context.requested : threshold;
     const allowance = decodeUint256(await this.rpc.call({
       from: principal.address, to: input.tokenIn, data: encodeAllowance(principal.address, context.router),
@@ -176,6 +180,8 @@ export class ProtocolService {
       transaction: tx(this.config, principal.address, context.router, data, value, gas),
       ...(approval === undefined ? {} : { approval }), preTransactions,
       tokenDecimals: { tokenIn: context.tokenInDecimals, tokenOut: context.tokenOutDecimals },
+      requiredInputUnits: requiredInput.toString(10),
+      minimumOutputUnits: (context.exactIn ? threshold : context.requested).toString(10),
     };
   }
 

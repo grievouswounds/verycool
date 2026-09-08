@@ -199,6 +199,27 @@
                   success_threshold: 1
                   failure_threshold: 30
 
+              facilitator:
+                command: >-
+                  bun "$${AQUA_ROOT}/apps/facilitator/src/main.ts"
+                  --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
+                depends_on:
+                  postgres-init:
+                    condition: process_completed_successfully
+                  manifest-generate:
+                    condition: process_completed_successfully
+                availability:
+                  restart: on_failure
+                  backoff_seconds: 2
+                readiness_probe:
+                  exec:
+                    command: curl --fail --silent "http://127.0.0.1:$${AQUA_FACILITATOR_PORT}/health/live" >/dev/null
+                  initial_delay_seconds: 1
+                  period_seconds: 2
+                  timeout_seconds: 2
+                  success_threshold: 1
+                  failure_threshold: 30
+
               activity-worker:
                 command: >-
                   bun "$${AQUA_ROOT}/apps/worker/src/main.ts"

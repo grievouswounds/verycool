@@ -2,10 +2,11 @@ import { AquaProtocolGateway, AuthService, LedgerWebAuthnService, OAuthService, 
 import { ActivityService, RpcActivityChain } from "@aqua/activity";
 import { loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
 import { ProtocolService } from "@aqua/contracts";
-import { initializeCubane, JsonRpcClient, hexToBytes, keccakHex } from "@aqua/evm";
+import { initializeCubane, JsonRpcClient, hexToBytes, hexToQuantity, keccakHex } from "@aqua/evm";
 import { IntentAuthorizationService, TradingService } from "@aqua/orderbook";
 import { SecretBrokerClient } from "@aqua/security";
 import { currencySchema, OneInchPriceClient, QuoterService } from "@aqua/quoter";
+import { TradeApiService } from "@aqua/trade-api";
 import { createServerOptions } from "./server.ts";
 
 const manifest=await loadRuntimeManifest(Bun.argv);
@@ -43,6 +44,13 @@ const activity=new ActivityService(activityRepository,new RpcActivityChain(rpc),
 const tradingRepository=new PostgresTradingRepository(database);
 await tradingRepository.initialize();
 const trading=new TradingService(tradingRepository,new AquaProtocolGateway(protocol,rpc),new IntentAuthorizationService(tradingRepository,rpc,{chainId:manifest.chain.id,controller:manifest.contracts.intentController.address,validitySeconds:defaults.intentAuthorizationTtlSeconds}),manifest.chain.id);
+const tradeApi=new TradeApiService(database,rpc,trading,quoter,manifest,{relay:async(call)=>{
+  const from=identity.keeper; const value=call.value===undefined?0n:hexToQuantity(call.value);
+  const [nonce,gas,gasPrice,priority]=await Promise.all([rpc.transactionCount(from),rpc.estimateGas({...call,from}),rpc.gasPrice(),rpc.maxPriorityFeePerGas()]);
+  const raw=await broker.signEip1559({chainId:BigInt(manifest.chain.id),nonce,maxPriorityFeePerGas:priority,maxFeePerGas:gasPrice*2n+priority,gas,to:call.to,value,data:call.data});
+  return rpc.sendRawTransaction(raw);
+}});
+await tradeApi.initialize();
 
 const readiness=async():Promise<boolean>=>{
   if(await rpc.chainId()!==manifest.chain.id)return false;
@@ -57,7 +65,7 @@ const readiness=async():Promise<boolean>=>{
 };
 if(!await readiness())throw new Error("Startup validation failed: stale or inconsistent runtime manifest");
 const apiUrl=new URL(manifest.services.apiUrl);
-const options=createServerOptions({trading,auth,activity,webauthn,oauth,quoter,manifest,corsOrigin:manifest.auth.origin,readiness,issuer:manifest.auth.issuer,resource:manifest.auth.resource});
+const options=createServerOptions({trading,tradeApi,auth,activity,webauthn,oauth,quoter,manifest,corsOrigin:manifest.auth.origin,readiness,issuer:manifest.auth.issuer,resource:manifest.auth.resource});
 Object.assign(options,{hostname:"127.0.0.1",port:Number(apiUrl.port)});
 const server=Bun.serve(options);
 console.log(JSON.stringify({level:"info",message:"server started",url:server.url.toString(),chainId:manifest.chain.id,manifestHash:runtimeManifestHash(manifest)}));

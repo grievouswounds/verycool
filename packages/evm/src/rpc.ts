@@ -103,6 +103,15 @@ export class JsonRpcClient implements RpcPort {
     }
   }
 
+  public async tokenName(address: Address): Promise<string | null> {
+    try {
+      const name = decodeString(await this.call({ to: address, data: selector("name()") })).normalize("NFC");
+      return name.length > 0 && Array.from(name).length <= 128 && !/\p{Cc}/u.test(name) ? name : null;
+    } catch {
+      return null;
+    }
+  }
+
   public async blockNumber(): Promise<bigint> {
     return hexToQuantity(quantitySchema.parse(await this.request("eth_blockNumber", [])));
   }
@@ -127,6 +136,10 @@ export class JsonRpcClient implements RpcPort {
 
   public async transactionCount(address: Address): Promise<bigint> {
     return hexToQuantity(quantitySchema.parse(await this.request("eth_getTransactionCount", [address, "pending"])));
+  }
+
+  public async balance(address: Address): Promise<bigint> {
+    return hexToQuantity(quantitySchema.parse(await this.request("eth_getBalance", [address, "latest"])));
   }
 
   public async gasPrice(): Promise<bigint> {

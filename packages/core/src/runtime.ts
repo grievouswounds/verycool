@@ -27,7 +27,7 @@ export const runtimeManifestSchema = z.object({
     deploymentBlock: z.string().regex(/^(?:0|[1-9][0-9]*)$/u),
   }).strict(),
   services: z.object({
-    databaseUrl: z.url(), apiUrl: httpUrl, mcpUrl: httpUrl,
+    databaseUrl: z.url(), apiUrl: httpUrl,
     facilitatorUrl: httpUrl, brokerSocket: z.string().min(1).max(1024),
   }).strict(),
   auth: z.object({

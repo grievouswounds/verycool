@@ -158,8 +158,8 @@ const apiUrl = `http://localhost:${String(input.apiPort)}`;
 const base = {
   schemaVersion: 1 as const, profile: "local-anvil" as const, runId: randomUUID(), createdAt: new Date().toISOString(),
   chain: { id: chainId, rpcUrl: rpcUrl.toString(), genesisHash: genesis.hash, deploymentBlock: deploymentBlock.toString(10) },
-  services: { databaseUrl: input.databaseUrl, apiUrl, mcpUrl: `${apiUrl}/mcp`, facilitatorUrl: `http://127.0.0.1:${String(input.facilitatorPort)}`, brokerSocket: input.brokerSocket },
-  auth: { issuer: apiUrl, resource: `${apiUrl}/mcp`, rpId: "localhost", origin: apiUrl, pasetoPublicKeys: input.pasetoPublicKeys },
+  services: { databaseUrl: input.databaseUrl, apiUrl, facilitatorUrl: `http://127.0.0.1:${String(input.facilitatorPort)}`, brokerSocket: input.brokerSocket },
+  auth: { issuer: apiUrl, resource: apiUrl, rpId: "localhost", origin: apiUrl, pasetoPublicKeys: input.pasetoPublicKeys },
   contracts: {
     aqua: contractFields("aqua"), aquaSwapRouter: contractFields("aquaSwapRouter"),
     limitSwapRouter: contractFields("limitSwapRouter"), wrappedNativeToken: contractFields("wrappedNativeToken"),

@@ -80,12 +80,17 @@ export class OneInchPriceClient {
   }
 
   public async search(chainId: number, query: string): Promise<TokenSearchResult> {
-    const body = tokenSearchSchema.safeParse(await this.request(`/token/v1.4/${String(chainId)}/search`, {
-      query, limit: "1", ignore_listed: "false",
-    }));
-    if (!body.success) throw new AppError(502, "urn:aqua:error:price-upstream", "Price upstream returned an invalid token response");
-    const token = body.data[0];
+    const tokens = await this.searchMany(chainId, query);
+    const token = tokens[0];
     if (token === undefined) throw new AppError(404, "urn:aqua:error:token-not-found", "No token matched the requested name");
     return token;
+  }
+
+  public async searchMany(chainId: number, query: string, limit = 10): Promise<readonly TokenSearchResult[]> {
+    const body = tokenSearchSchema.safeParse(await this.request(`/token/v1.4/${String(chainId)}/search`, {
+      query, limit: String(Math.max(1, Math.min(limit, 20))), ignore_listed: "false",
+    }));
+    if (!body.success) throw new AppError(502, "urn:aqua:error:price-upstream", "Price upstream returned an invalid token response");
+    return body.data;
   }
 }

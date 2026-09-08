@@ -18,6 +18,19 @@ contract MockVaultToken {
     function transfer(address recipient, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount; balanceOf[recipient] += amount; return true;
     }
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool) {
+        uint256 permitted = allowance[sender][msg.sender]; require(permitted >= amount, "allowance");
+        allowance[sender][msg.sender] = permitted - amount; balanceOf[sender] -= amount; balanceOf[recipient] += amount; return true;
+    }
+}
+
+contract MockSwapRouter {
+    struct Order { address maker; uint256 traits; bytes data; }
+    function swap(Order calldata, address tokenIn, address tokenOut, uint256 amount, bytes calldata) external returns (uint256) {
+        MockVaultToken(tokenIn).transferFrom(msg.sender, address(this), amount);
+        MockVaultToken(tokenOut).mint(msg.sender, amount * 2);
+        return amount * 2;
+    }
 }
 
 contract MockAquaOrderBook {
@@ -79,6 +92,28 @@ contract AquaOrderVaultTest {
         // not an externally-influenced token, so an exact balance assertion is intentional here.
         // forge-lint: disable-next-line(incorrect-strict-equality)
         require(token.balanceOf(owner) == 100, "owner did not recover funds");
+    }
+
+    function testOneShotSwapUsesExactApprovalAndPaysLedgerOwner() external {
+        address owner = vm.addr(OWNER_KEY); address agent = vm.addr(AGENT_KEY);
+        MockVaultToken token = new MockVaultToken(); MockVaultToken quote = new MockVaultToken();
+        MockAquaOrderBook aqua = new MockAquaOrderBook(); MockSwapRouter router = new MockSwapRouter();
+        AquaOrderVaultFactory factory = new AquaOrderVaultFactory();
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 validUntil = uint64(block.timestamp + 1 days);
+        bytes32 delegation = keccak256(abi.encode(factory.DELEGATION_TYPEHASH(), owner, agent, address(token), uint256(100), uint256(200), uint256(validUntil), uint256(0)));
+        factory.registerDelegation(owner, agent, address(token), 100, 200, validUntil, _signature(OWNER_KEY, _digest(factory.DOMAIN_SEPARATOR(), delegation)));
+        AquaOrderVault vault = factory.deployVault(owner, agent, address(aqua), address(router), address(token), bytes32(uint256(8)));
+        token.mint(address(vault), 100);
+        MockSwapRouter.Order memory order = MockSwapRouter.Order(address(vault), 1 << 254, hex"01");
+        bytes memory callData = abi.encodeCall(MockSwapRouter.swap, (order, address(token), address(quote), 100, bytes("")));
+        address[] memory tokens = new address[](2); tokens[0] = address(quote); tokens[1] = address(token);
+        uint256[] memory amounts = new uint256[](2); amounts[0] = 190; amounts[1] = 100;
+        AquaOrderVaultFactory.LifecycleRequest memory request = AquaOrderVaultFactory.LifecycleRequest({ vault: vault, action: 3, strategy: callData, tokens: tokens, amounts: amounts, deadline: block.timestamp + 60 });
+        factory.execute(request, _actionSignature(factory, request, AGENT_KEY, 0));
+        // Deterministic test token and router make exact postconditions appropriate here.
+        // forge-lint: disable-next-line(incorrect-strict-equality)
+        require(quote.balanceOf(owner) == 200 && token.allowance(address(vault), address(router)) == 0, "unsafe swap result");
     }
 
     function _actionSignature(

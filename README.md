@@ -1,6 +1,6 @@
 # Aqua backend
 
-A non-custodial, chain-wide Aqua order-book API implemented directly with `Bun.serve`. One agent-first business endpoint prepares user-signed transactions, queries compatible indexed liquidity, and accepts narrowly scoped `aqua-intent-v1` authorizations for conditional keeper work. User keys never enter the service.
+A non-custodial Aqua order-book and Ledger Key Ring trading API implemented with `Bun.serve`. The canonical agent flow is an immutable preview followed by an x402 exact/Permit2-funded submission. A distributable local stdio MCP bridge owns OAuth, Ledger Key Ring provisioning, and signing; user keys never enter the API.
 
 It also monitors confirmed ERC-20 transfers for addresses selected by authenticated users. Collection is polling-based: a separate worker wakes once per minute and writes results to PostgreSQL; subscribing never opens a websocket.
 
@@ -11,7 +11,7 @@ It also monitors confirmed ERC-20 transfers for addresses selected by authentica
 | Runtime and HTTP | Bun with native `Bun.serve({ routes })` |
 | Language | TypeScript 5.9 with the strictest compiler profile and zero first-party `any` |
 | Validation and OpenAPI | Zod 4, OpenAPI 3.1, vendored Swagger UI |
-| Ethereum | Cubane, Noble JavaScript crypto adapters, native-fetch EIP-1474 RPC |
+| Ethereum | Cubane/Noble RPC, ABI, EIP-712, signing, recovery, and transaction primitives |
 | Prices and quotes | Optional native-fetch 1inch spot prices and native SwapVM `eth_call` simulation |
 | Authentication | Explicit SIWE parsing, EOA/EIP-1271 verification, PASETO `v4.public` with PASERK key rotation |
 | Persistence | PostgreSQL and transactions |
@@ -29,7 +29,7 @@ Prerequisites are Nix with flakes enabled. The development shell provides Bun, A
 nix develop -c dev
 ```
 
-On the first run, connect an unlocked Ledger with its Ethereum app open and quit Ledger Live. The launcher verifies the device, prompts twice for a new local keyring password when the `aqua-ledger-wallet-pass` Keychain item is absent, and atomically creates four encrypted keys in `.data/keyring`. It then starts PostgreSQL and Anvil, deploys and verifies every protocol contract, seeds deterministic two-way fixture liquidity, and starts the API and both workers. The API listens on `http://localhost:8787`; open Swagger at `http://localhost:8787/docs` or check readiness at `http://localhost:8787/health/ready`.
+On the first server run, connect an unlocked Ledger and quit Ledger Live. The launcher provisions the service broker keys, then starts PostgreSQL, Anvil, the x402 facilitator, the API, and both workers. The API listens on `http://localhost:8787`; open Swagger at `http://localhost:8787/docs` or check readiness at `http://localhost:8787/health/ready`.
 
 Both `nix develop -c dev` and `nix run .#dev` use API hot reload. Use `aube run start` or `nix run .#start` for the same complete stack without hot reload. Run `ledger-bootstrap` inside the development shell for explicit device diagnostics or recovery.
 
@@ -95,7 +95,7 @@ nix build .#order-worker           # build the order-book-worker launcher
 
 The native packages and development shell are available on every supported flake system, including Apple Silicon macOS.
 
-Cubane 0.3.12 is pinned because it was the current registry release at implementation time. A small committed declaration patch contains its unsafe third-party declaration surface; all values crossing that boundary are validated before becoming first-party branded types. No viem, ethers, web3, or 1inch SDK package is installed.
+Cubane 0.3.12 is the first-party EVM boundary. The API, workers, contracts adapter, local LKRP signer, and x402 facilitator never import viem, ethers, web3, or the 1inch SDK. The pinned `@x402/evm` package currently retains viem as an internal implementation dependency; removing it from the transitive graph requires a maintained fork or replacement of that pinned package.
 
 ## API
 
@@ -106,7 +106,13 @@ Authenticated endpoints require `Authorization: Bearer <access-token>`. Access t
 - `POST /v1/auth/challenges`: `{ "address": "0x…" }`
 - `POST /v1/auth/sessions`: `{ "challengeId": "uuid", "message": "exact challenge message", "signature": "0x…" }`
 - `POST /v1/auth/refresh`: no body; rotates the secure `refresh_token` cookie.
-- `POST /v1/trading`: the sole trading business route. Its `action` selects `createOrder`, `amendOrder`, `cancelOrders`, `executeOrder`, `prepareSwap`, `batch`, `query`, or `manageWrappedNative`. Nested discriminators make incompatible combinations unrepresentable.
+- `POST /v1/trade-previews`: resolve address/search/native token references and return an immutable five-minute plan with classification and RPC safety checks.
+- `POST /v1/trades`: submit `{previewId, previewHash, lifecycleSignature}` with `Idempotency-Key`; the first request returns x402 v2 `PAYMENT-REQUIRED` for an exact Permit2 retry.
+- `GET /v1/trades`: select `own`, `subscriptions`, or `all`, with filters, stable sorting, and cursor pagination.
+- `POST /v1/agents/me/challenges` and `PUT /v1/agents/me`: bind the local LKRP agent by EIP-712 proof of possession.
+- `POST /v1/delegations/previews` and `POST /v1/delegations`: prepare and relay bounded Ledger-owner policies.
+- `POST /v1/trade-subscriptions`, `DELETE /v1/trade-subscriptions/{address}`, and `POST /v1/trade-subscriptions/trades/wipe`: manage subscribed-wallet trade projections.
+- `POST /v1/trading`: retained for advanced REST-only workflows.
 - `GET /v1/prices/address/{address}` and `GET /v1/prices/name/{name}`: authenticated deployment-chain spot prices. These return `503` when `ONEINCH_API_KEY` is not configured.
 - `POST /v1/quotes/aqua`: authenticated, read-only exact-input or exact-output simulation for one encoded Aqua order.
 
@@ -132,7 +138,7 @@ All trading amounts and prices are human decimal strings. Price always means quo
 
 Supported orders are market, limit, stop-market, stop-limit, trailing-stop, take-profit market/limit, OCO, and bracket. Policies include GTC, GTD, IOC, FOK, partial, all-or-none, post-only, and book-or-cancel. Queries cover orders, fills, book depth, ticker, recent trades, candles, balances, and fees. Batches are capped at 20 operations.
 
-Conditional commands use the custom `aqua-intent-v1` challenge/retry profile. An unsigned request returns `402` and `AQUA-AUTHORIZATION-REQUIRED`. Sign the returned EIP-712 value and repeat the identical command with a base64url `AQUA-AUTHORIZATION` header containing `authorizationId` and `signature`. Success returns `202` and `AQUA-AUTHORIZATION-RESPONSE`. This grants narrow trading authority; it is not an x402 payment and does not replace SIWE authentication.
+Conditional commands on the legacy `/v1/trading` route continue to use `aqua-intent-v1`. The canonical `/v1/trades` route uses standard x402 v2 exact Permit2 funding.
 
 Legacy trading routes were removed in API v1. Migrate them to the corresponding `/v1/trading` action. Swagger includes complete schemas and examples at `/docs`; `/v1/capabilities` is the compact machine-readable discovery surface.
 
@@ -166,6 +172,20 @@ or:
 Send either body to `POST /v1/erc20-monitor/actions/wipe`. A pure incoming transfer is `received`, not automatically a `buy`. Buy/sell labels are emitted only when a transaction contains opposite-direction transfers of different ERC-20 tokens involving the watched address, and carry `classificationSource: "inferredCounterflow"`. Native-currency counterflows are not guessed.
 
 `payWithNative` prepares a wrapped-native deposit before the SwapVM call. The pinned SwapVM v1.0.2 `swap` entry point is non-payable, so the swap itself intentionally has zero native value. `receiveNative` uses the router unwrap trait and is restricted to the configured wrapped-native token.
+
+## Local MCP bridge
+
+`apps/mcp-bridge` exposes exactly `request_trade`, `post_trade`, `get_trades`, `subscribe_to_user`, `unsubscribe_from_user`, and `wipe_subscribed_trades` over stdio. On first start its isolated signer runs `wallet-cli ring init` when required, creates a random secp256k1 agent key, and writes only LKRP ciphertext plus the public address. Decryption and signing happen only in the child signer process; plaintext key material is never printed or persisted. After authentication the bridge automatically proves possession of and binds that agent. Fund the displayed agent with native gas and sell assets, then register the suggested Ledger delegation before the first trade.
+
+The bridge discovers the Bun API's OAuth metadata, registers a loopback client, opens the Ledger FIDO2 authorization ceremony in the browser, and stores its rotating refresh token in a mode-0600 local cache. Its audience is the Bun API resource URI, not a remote MCP URL. `AQUA_ACCESS_TOKEN` remains an explicit development override. Set `AQUA_API_URL` when it differs from `http://127.0.0.1:3000`; `AQUA_OAUTH_CALLBACK_PORT` defaults to `41739`. Optional `AQUA_AGENT_CIPHERTEXT`, `AQUA_AGENT_METADATA`, `AQUA_PREVIEW_CACHE`, and `AQUA_OAUTH_CACHE` paths relocate local state.
+
+### Bazantic discovery and x402 payments
+
+`packages/bazantic` adds bounded MCP catalog discovery, per-gateway `tools/list` discovery, and a shared x402-paying HTTP client. Gateway hosts are accepted only from Bazantic catalog results, REST paths remain relative to those hosts, and a paid call is attempted only after an unpaid probe returns `402`. Bazantic `tools/call` is discovery-only because ordinary MCP clients cannot settle its payment challenge; paid work uses the discovered REST path.
+
+The same isolated LKRP/Cubane signer serves both payment profiles, but they are intentionally different. Aqua trade activation funds the exact Permit2 vault request on the deployment chain (local Anvil is `eip155:31337`) and keeps the local facilitator. Bazantic accepts only exact Base USDC (`eip155:8453`) requirements within the caller's atomic-unit ceiling, which defaults to `10000` (0.01 USDC). Fund the agent address with Anvil gas and sell tokens for local Aqua trades and, independently, with USDC plus gas on Base for Bazantic calls. `wallet-cli` cannot send on Base, so use another reviewed Base-capable funding path.
+
+The Bazantic CLI, hosted grants, and `BAZANTIC_GATEWAY_PRIVATE_KEY` are not runtime dependencies. 1inch Aqua quotes remain local SwapVM `eth_call` simulations; `ONEINCH_API_KEY` enables only optional spot-price endpoints. Publishing this localhost API as a Bazantic provider remains out of scope until it has a public HTTPS endpoint and publicly reachable OpenAPI document.
 
 ## Configuration
 

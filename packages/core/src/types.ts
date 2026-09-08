@@ -38,10 +38,12 @@ export interface RpcPort {
   estimateGas(transaction: RpcCall): Promise<bigint>;
   tokenDecimals(address: Address): Promise<number>;
   tokenSymbol(address: Address): Promise<string | null>;
+  tokenName?(address: Address): Promise<string | null>;
   blockNumber(): Promise<bigint>;
   block(number: bigint): Promise<RpcBlock>;
   logs(filter: RpcLogFilter): Promise<readonly RpcLog[]>;
   transactionCount(address: Address): Promise<bigint>;
+  balance?(address: Address): Promise<bigint>;
   gasPrice(): Promise<bigint>;
   maxPriorityFeePerGas(): Promise<bigint>;
   sendRawTransaction(transaction: Hex): Promise<Hash>;
