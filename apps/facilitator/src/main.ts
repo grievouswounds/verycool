@@ -106,7 +106,7 @@ const parsedRequest = async (request: Request): Promise<{ readonly paymentPayloa
   return { paymentPayload: parsed.paymentPayload, paymentRequirements: parsed.paymentRequirements };
 };
 const host = new URL(manifest.services.facilitatorUrl);
-const server = Bun.serve({ hostname: host.hostname, port: Number(host.port), routes: {
+const server = Bun.serve({ hostname: Bun.env["AQUA_BIND_HOST"]?.trim() ?? host.hostname, port: Number(host.port), routes: {
   "/supported": { GET: () => Response.json(facilitator.getSupported()) },
   "/verify": { POST: async (request) => { const body = await parsedRequest(request); return Response.json(await facilitator.verify(body.paymentPayload, body.paymentRequirements)); } },
   "/settle": { POST: async (request) => { const body = await parsedRequest(request); return Response.json(await facilitator.settle(body.paymentPayload, body.paymentRequirements)); } },

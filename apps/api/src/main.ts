@@ -73,7 +73,7 @@ const readiness=async():Promise<boolean>=>{
 if(!await readiness())throw new Error("Startup validation failed: stale or inconsistent runtime manifest");
 const apiUrl=new URL(manifest.services.apiUrl);
 const options=createServerOptions({trading,tradeApi,auth,activity,webauthn,oauth,quoter,manifest,corsOrigin:manifest.auth.origin,readiness,issuer:manifest.auth.issuer,resource:manifest.auth.resource});
-Object.assign(options,{hostname:"127.0.0.1",port:Number(apiUrl.port)});
+Object.assign(options,{hostname:Bun.env["AQUA_BIND_HOST"]?.trim()??"127.0.0.1",port:Number(apiUrl.port)});
 const server=Bun.serve(options);
 console.log(JSON.stringify({level:"info",message:"server started",url:server.url.toString(),chainId:manifest.chain.id,manifestHash:runtimeManifestHash(manifest)}));
 const shutdown=async():Promise<void>=>{await server.stop();await closeDatabase(database);};

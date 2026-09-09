@@ -20,6 +20,7 @@ services:
       AQUA_LOCAL_RPC_URL: http://127.0.0.1:8545
       DATABASE_URL: postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend
       AQUA_EMULATED_INNER: "1"
+      AQUA_BIND_HOST: "0.0.0.0"
     volumes:
       - .:/workspace
       - nix-store:/nix

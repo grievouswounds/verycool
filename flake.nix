@@ -507,9 +507,11 @@
                     exit 1
                   fi
                   export AQUA_E2E=1
+                  export AQUA_LEDGER_TRANSPORT=speculos
                   export AQUA_WALLET_CLI="''${AQUA_WALLET_CLI:-$AQUA_ROOT/test/e2e/wallet-cli-adapter.ts}"
                   export AQUA_E2E_LKRP_STATE="''${AQUA_E2E_LKRP_STATE:-$AQUA_STATE_DIR/lkrp}"
                   export AQUA_SPECULOS_URL="''${AQUA_SPECULOS_URL:-http://127.0.0.1:5000}"
+                  export AQUA_BIND_HOST="''${AQUA_BIND_HOST:-0.0.0.0}"
                   mkdir -p "$AQUA_STATE_DIR"
                   if [ ! -f "$AQUA_STATE_DIR/wallet-pass" ]; then
                     umask 077

@@ -12,12 +12,15 @@ fi
 
 if [[ "$(uname -s)" == Darwin && "${AQUA_E2E_INNER:-0}" != 1 ]]; then
   command -v docker >/dev/null || { echo "Docker is required for the Linux Speculos E2E environment" >&2; exit 1; }
-  docker build -t aqua-speculos-e2e -f "$root/test/e2e/Dockerfile" "$root/test/e2e"
-  exec docker run --rm --platform linux/arm64 -e AQUA_E2E_INNER=1 \
+  uid="$(id -u)"
+  gid="$(id -g)"
+  docker build -t aqua-speculos-e2e --build-arg "UID=$uid" --build-arg "GID=$gid" -f "$root/Dockerfile" "$root"
+  exec docker run --rm --platform linux/arm64 --privileged -e AQUA_E2E_INNER=1 \
     -e AQUA_BAZANTIC_GATEWAY_SLUG="${AQUA_BAZANTIC_GATEWAY_SLUG:-}" \
+    -e "AQUA_UID=$uid" -e "AQUA_GID=$gid" \
     -v aqua-speculos-nix-store:/nix \
-    -v aqua-speculos-aube-cache:/root/.cache/aube \
-    -v aqua-speculos-aube-store:/root/.local/share/aube \
+    -v aqua-speculos-aube-cache:/home/aqua/.cache/aube \
+    -v aqua-speculos-aube-store:/home/aqua/.local/share/aube \
     -v "$root:/workspace" -w /workspace \
     -v aqua-speculos-node-modules:/workspace/node_modules \
     aqua-speculos-e2e e2e "$mode" "$@"
