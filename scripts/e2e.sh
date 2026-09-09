@@ -56,8 +56,8 @@ start_speculos() {
     ledger-sync) probe_apdu=e004000000; probe_expect=4c65646765722053796e63; probe_name=get-app-name ;;
     ethereum) probe_apdu=e006000000; probe_expect=9000; probe_name=get-app-configuration ;;
     security-key)
-      probe_apdu=000300000000000000; probe_expect=5532465f5632; probe_name=u2f-get-version
-      speculos_args+=(--usb U2F)
+      probe_apdu=""; probe_expect=""; probe_name=ctaphid-u2f
+      speculos_args=(--model nanosp --display headless --api-port 5000 --apdu-port 5001 --usb U2F)
       ;;
     *) echo "Unknown Ledger E2E app: $app" >&2; exit 1 ;;
   esac
@@ -73,8 +73,12 @@ start_speculos() {
   done
   if [[ "$ready" != 1 ]]; then
     echo "Speculos failed to start the $app app" >&2
-    sed -n '1,200p' "$work/speculos/$app.log" >&2
+    head -n 200 "$work/speculos/$app.log" >&2 || true
     exit 1
+  fi
+  if [[ "$app" == ethereum ]]; then
+    curl -fsS -X POST http://127.0.0.1:5000/automation -H "content-type: application/json" \
+      --data-binary @"$root/test/e2e/ethereum-automation.json" >/dev/null
   fi
   AQUA_SPECULOS_APP="$app" AQUA_SPECULOS_ELF="$elf" AQUA_SPECULOS_EVIDENCE="$root/reports/e2e/speculos-$app.json" \
     AQUA_SPECULOS_PROBE_APDU="$probe_apdu" AQUA_SPECULOS_PROBE_EXPECT="$probe_expect" AQUA_SPECULOS_PROBE_NAME="$probe_name" \
@@ -82,21 +86,16 @@ start_speculos() {
   if [[ "$app" == ethereum ]]; then
     export AQUA_LEDGER_TRANSPORT=speculos
     export AQUA_SPECULOS_URL=http://127.0.0.1:5000
-    local approval_stop="$work/speculos/ethereum-approval.stop"
-    rm -f "$approval_stop"
-    AQUA_SPECULOS_APPROVAL_STOP="$approval_stop" AQUA_SPECULOS_APPROVAL_LOG="$work/speculos/ethereum-approvals.jsonl" \
-      bun "$root/test/e2e/speculos-approve.ts" &
-    local approval_pid=$!
-    AQUA_E2E_REPORT="$root/reports/e2e/ethereum-owner.json" bun "$root/test/e2e/ethereum-owner.ts"
-    if [[ "$keep_alive" == 1 ]]; then
-      processes+=("$approval_pid")
-    else
-      touch "$approval_stop"
-      wait "$approval_pid" 2>/dev/null || true
+    if ! AQUA_E2E_REPORT="$root/reports/e2e/ethereum-owner.json" bun "$root/test/e2e/ethereum-owner.ts"; then
+      echo "Ethereum owner SIWE step failed; Speculos screen and logs follow" >&2
+      curl -sS "http://127.0.0.1:5000/events?currentscreenonly=true" >&2 || true
+      head -n 200 "$work/speculos/$app.log" >&2 || true
+      exit 1
     fi
   fi
   if [[ "$app" == security-key ]]; then
-    AQUA_E2E_REPORT="$root/reports/e2e/security-key-ctap.json" python3 "$root/test/e2e/security-key-ctap.py"
+    [[ -n "${AQUA_PYTHON:-}" ]] || { echo "AQUA_PYTHON is required for the security-key CTAPHID probe" >&2; exit 1; }
+    AQUA_E2E_REPORT="$root/reports/e2e/security-key-ctap.json" "$AQUA_PYTHON" "$root/test/e2e/security-key-ctap.py"
   fi
   if [[ "$app" == ledger-sync ]]; then
     export AQUA_E2E_LKRP_STATE="$work/lkrp"
@@ -174,6 +173,8 @@ for _ in $(seq 1 60); do cast chain-id --rpc-url "$AQUA_LOCAL_RPC_URL" >/dev/nul
 bun "$root/scripts/deploy-local-chain.ts"
 bun "$root/scripts/generate-local-manifest.ts" --rpc-url "$AQUA_LOCAL_RPC_URL" --deployments "$AQUA_STATE_DIR/deployments.json" --out "$AQUA_STATE_DIR/runtime-manifest.json"
 AQUA_E2E_REPORT="$root/reports/e2e/chain.json" bun "$root/test/e2e/chain-evidence.ts"
+# Indexer confirmations are 1, so seed orders are not indexable until a later block exists.
+cast rpc anvil_mine --rpc-url "$AQUA_LOCAL_RPC_URL"
 
 # Start an isolated PostgreSQL and the full application assembly against the
 # same generated runtime manifest and broker identity.
@@ -181,7 +182,7 @@ initdb -D "$work/postgresql" --auth=trust --no-locale >"$work/initdb.log"
 postgres -D "$work/postgresql" -h 127.0.0.1 -p 15432 -k "$work" >"$work/postgresql.log" 2>&1 &
 processes+=("$!")
 for _ in $(seq 1 80); do pg_isready -h 127.0.0.1 -p 15432 -d postgres >/dev/null 2>&1 && break; sleep 0.25; done
-createuser -h 127.0.0.1 -p 15432 aqua
+createuser -h 127.0.0.1 -p 15432 aqua 2>/dev/null || true
 createdb -h 127.0.0.1 -p 15432 -O aqua aqua_e2e
 bun "$root/scripts/migrate.ts"
 export AQUA_RUNTIME_MANIFEST="$AQUA_STATE_DIR/runtime-manifest.json"
@@ -227,7 +228,12 @@ export AQUA_MCP_BRIDGE="$root/apps/mcp-bridge/src/main.ts"
 # Bring Ethereum back for delegation signing and execute the six MCP operations
 # using the official stdio SDK client.
 start_speculos ethereum 1
-AQUA_E2E_REPORT="$root/reports/e2e/mcp.json" bun "$root/test/e2e/mcp-full-flow.ts"
+if ! AQUA_E2E_REPORT="$root/reports/e2e/mcp.json" bun "$root/test/e2e/mcp-full-flow.ts"; then
+  echo "MCP full flow failed; API and worker logs follow" >&2
+  tail -n 200 "$work/api.log" >&2 || true
+  tail -n 80 "$work/order-worker.log" >&2 || true
+  exit 1
+fi
 curl --cacert "$work/bazantic.crt" -fsS https://127.0.0.1:19443/evidence >"$root/reports/e2e/bazantic-local.json"
 jq -e '.catalogRequests >= 1 and .listRequests >= 1 and .paidRequests == 0' "$root/reports/e2e/bazantic-local.json" >/dev/null
 

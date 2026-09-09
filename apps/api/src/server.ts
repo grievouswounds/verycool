@@ -191,7 +191,11 @@ const execute = async (request: Request, action: () => Promise<Response>, corsOr
       422, "urn:aqua:error:validation", "Request does not belong to the endpoint input language", id,
       error.issues.map((issue) => ({ code: issue.code, path: issue.path.map(String).join("."), message: issue.message })),
     );
-    console.error(JSON.stringify({ level: "error", requestId: id, message: error instanceof Error ? error.message : "Unknown error" }));
+    console.error(JSON.stringify({
+      level: "error", requestId: id,
+      message: error instanceof Error ? error.message : "Unknown error",
+      stack: error instanceof Error ? error.stack : undefined,
+    }));
     return problem(500, "urn:aqua:error:internal", "Unexpected server error", id);
   }
 };

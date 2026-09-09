@@ -206,7 +206,10 @@ const getTrades = async (arguments_: unknown) => {
 const subscription = async (arguments_: unknown, remove: boolean) => { const { address } = z.object({ address: addressSchema }).strict().parse(arguments_); return output(await json(await api(remove ? `/v1/trade-subscriptions/${address}` : "/v1/trade-subscriptions", remove ? { method: "DELETE" } : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }) }))); };
 const wipe = async (arguments_: unknown) => { const parsed = subscribedTradesWipeSchema.parse(arguments_); return output(await json(await api("/v1/trade-subscriptions/trades/wipe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(parsed) }))); };
 
-const schema = (value: z.ZodType): Record<string, unknown> => z.record(z.string(), z.unknown()).parse(z.toJSONSchema(value, { target: "draft-2020-12", io: "input" }));
+const schema = (value: z.ZodType): Record<string, unknown> => {
+  const json = z.record(z.string(), z.unknown()).parse(z.toJSONSchema(value, { target: "draft-2020-12", io: "input" }));
+  return json["type"] === "object" ? json : { type: "object", ...json };
+};
 const tools = [
   { name: "request_trade", description: "Resolve, quote, fully describe, and simulate an immutable trade before signing.", inputSchema: schema(tradePreviewRequestSchema) },
   { name: "post_trade", description: "Sign the reviewed lifecycle plan locally, satisfy its exact x402 Permit2 funding request, and submit it.", inputSchema: schema(z.object({ previewId: z.uuid(), previewHash: hashSchema }).strict()) },

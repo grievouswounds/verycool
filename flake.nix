@@ -160,6 +160,9 @@
           TARGET = "nanos2";
           API_LEVEL = "26";
           enableParallelBuilding = true;
+          postPatch = pkgs.lib.optionalString (name == "security-key") ''
+            sed -i '/^DEFINES += ENABLE_RK_CONFIG$/d' Makefile
+          '';
           buildPhase = ''
             runHook preBuild
             if [ ! -d .git ]; then
@@ -592,6 +595,7 @@
             runtimeInputs = [
               pkgs.bash
               pkgs.coreutils
+              pkgs.curl
               pkgs.git
               pkgs.nix
             ];
@@ -639,7 +643,7 @@
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
           let
             speculos = speculosPackage pkgs;
-            securityKey = ledgerApp pkgs "security-key" ledger-security-key "ENABLE_RK_CONFIG_UI_SETTING=0";
+            securityKey = ledgerApp pkgs "security-key" ledger-security-key "";
             ledgerSyncApp = ledgerApp pkgs "ledger-sync" ledger-sync "";
             ethereumApp = ledgerApp pkgs "ethereum" ledger-ethereum "";
           in
@@ -799,6 +803,7 @@
                   export AQUA_SPECULOS_BIN=${self.packages.${system}.speculos}/bin/speculos
                   export AQUA_LEDGER_E2E_ASSETS=${self.packages.${system}.ledger-e2e-assets}
                   export AQUA_LEDGER_SECURITY_KEY_SOURCE=${ledger-security-key}
+                  export AQUA_PYTHON=${pkgs.python3.withPackages (ps: [ ps.fido2 ])}/bin/python3
                 ''}
               export AQUA_STATE_DIR="''${AQUA_STATE_DIR:-$PWD/.data}"
               export DATABASE_URL="''${DATABASE_URL:-postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend}"

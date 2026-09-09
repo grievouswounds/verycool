@@ -1,5 +1,5 @@
 /* global console */
-import { DeviceActionStatus, DeviceManagementKitBuilder, UserInteractionRequired } from "@ledgerhq/device-management-kit";
+import { DeviceActionStatus, DeviceManagementKitBuilder, DeviceModelId, UserInteractionRequired } from "@ledgerhq/device-management-kit";
 import { SignerEthBuilder } from "@ledgerhq/device-signer-kit-ethereum";
 import { nodeHidTransportFactory } from "@ledgerhq/device-transport-kit-node-hid";
 import { speculosTransportFactory } from "@ledgerhq/device-transport-kit-speculos";
@@ -29,13 +29,16 @@ const withLedger = async (operation) => {
   if (requestedTransport !== "node-hid" && requestedTransport !== "speculos") throw new Error("AQUA_LEDGER_TRANSPORT must be node-hid or speculos");
   if (requestedTransport === "speculos" && process.env.AQUA_E2E !== "1") throw new Error("Speculos transport is restricted to AQUA_E2E=1");
   const transportFactory = requestedTransport === "speculos"
-    ? speculosTransportFactory(process.env.AQUA_SPECULOS_URL ?? "http://127.0.0.1:5000")
+    ? speculosTransportFactory(process.env.AQUA_SPECULOS_URL ?? "http://127.0.0.1:5000", true, DeviceModelId.NANO_SP)
     : nodeHidTransportFactory;
   const dmk = new DeviceManagementKitBuilder().addTransport(transportFactory).build();
   console.error(requestedTransport === "speculos" ? "Connecting to the E2E Speculos Ledger." : "Connect and unlock the Ledger owner device.");
   const devices = await firstValueFrom(dmk.listenToAvailableDevices({}).pipe(filter((items) => items.length > 0), timeout(deviceTimeoutMs)));
   if (!devices[0]) throw new Error("No Ledger device is available");
-  const sessionId = await dmk.connect({ device: devices[0], sessionRefresherOptions: { isRefresherDisabled: false, pollingInterval: 3000 } });
+  const sessionId = await dmk.connect({
+    device: devices[0],
+    sessionRefresherOptions: { isRefresherDisabled: requestedTransport === "speculos", pollingInterval: 3000 },
+  });
   try {
     const signer = new SignerEthBuilder({ dmk, sessionId }).build();
     const { address } = await runAction(signer.getAddress(derivationPath, { checkOnDevice: false }));

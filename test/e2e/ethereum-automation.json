@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "regexp": "Sign message|Sign typed|Hold to sign|Hold to approve",
+      "actions": [
+        ["button", 1, true],
+        ["button", 2, true],
+        ["button", 1, false],
+        ["button", 2, false]
+      ]
+    },
+    {
+      "regexp": "Review message|Review typed|Message \\(|Continue|Allow",
+      "actions": [
+        ["button", 2, true],
+        ["button", 2, false]
+      ]
+    }
+  ]
+}
