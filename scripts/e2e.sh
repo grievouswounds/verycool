@@ -15,7 +15,11 @@ if [[ "$(uname -s)" == Darwin && "${AQUA_E2E_INNER:-0}" != 1 ]]; then
   docker build -t aqua-speculos-e2e -f "$root/test/e2e/Dockerfile" "$root/test/e2e"
   exec docker run --rm --platform linux/arm64 -e AQUA_E2E_INNER=1 \
     -e AQUA_BAZANTIC_GATEWAY_SLUG="${AQUA_BAZANTIC_GATEWAY_SLUG:-}" \
-    -v aqua-speculos-nix-store:/nix -v "$root:/workspace" -w /workspace \
+    -v aqua-speculos-nix-store:/nix \
+    -v aqua-speculos-aube-cache:/root/.cache/aube \
+    -v aqua-speculos-aube-store:/root/.local/share/aube \
+    -v "$root:/workspace" -w /workspace \
+    -v aqua-speculos-node-modules:/workspace/node_modules \
     aqua-speculos-e2e e2e "$mode" "$@"
 fi
 
@@ -59,7 +63,16 @@ start_speculos() {
     "$elf" >"$work/speculos/$app.log" 2>&1 &
   local pid=$!
   processes+=("$pid")
-  for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:5000/events >/dev/null 2>&1 && break; sleep 0.25; done
+  local ready=0
+  for _ in $(seq 1 60); do
+    if curl -fsS http://127.0.0.1:5000/events >/dev/null 2>&1; then ready=1; break; fi
+    sleep 0.25
+  done
+  if [[ "$ready" != 1 ]]; then
+    echo "Speculos failed to start the $app app" >&2
+    sed -n '1,200p' "$work/speculos/$app.log" >&2
+    exit 1
+  fi
   AQUA_SPECULOS_APP="$app" AQUA_SPECULOS_ELF="$elf" AQUA_SPECULOS_EVIDENCE="$root/reports/e2e/speculos-$app.json" \
     AQUA_SPECULOS_PROBE_APDU="$probe_apdu" AQUA_SPECULOS_PROBE_EXPECT="$probe_expect" AQUA_SPECULOS_PROBE_NAME="$probe_name" \
     bun "$root/test/e2e/speculos-smoke.ts"

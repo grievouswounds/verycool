@@ -84,6 +84,12 @@
             hash = "sha256-zS9x4Dg1JnAC2nkzJ8Z4g+vOe4IfJKla2d+R+4QZRxo=";
           };
           cargoHash = "sha256-m8ZmU1PVx1PN2IeiKAh4T625PFBed2sdnLZS7751b4I=";
+          cargoBuildFlags = [
+            "--bin"
+            "aube"
+          ];
+          CARGO_PROFILE_RELEASE_LTO = "false";
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16";
           doCheck = false;
           nativeBuildInputs = [
             pkgs.cmake
@@ -152,6 +158,7 @@
           ];
           BOLOS_SDK = ledger-secure-sdk;
           TARGET = "nanos2";
+          API_LEVEL = "26";
           enableParallelBuilding = true;
           buildPhase = ''
             runHook preBuild
@@ -163,7 +170,7 @@
               GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" \
                 git commit --quiet --message source
             fi
-            make SHELL=${pkgs.bash}/bin/bash CLANGPATH=${pkgs.llvmPackages.clang-unwrapped}/bin/ DEBUG=1 ${extraMakeFlags} build/nanos2/bin/app.elf
+            make SHELL=${pkgs.bash}/bin/bash CLANGPATH=${pkgs.llvmPackages.clang-unwrapped}/bin/ API_LEVEL=$API_LEVEL DEBUG=1 ${extraMakeFlags} build/nanos2/bin/app.elf
             runHook postBuild
           '';
           installPhase = ''
@@ -180,6 +187,10 @@
         let
           python = pkgs.python3;
           ledgered = ledgeredPackage pkgs;
+          qemuStaticCompat = pkgs.runCommand "qemu-arm-static-compat" { } ''
+            mkdir -p "$out/bin"
+            ln -s ${pkgs.qemu-user}/bin/qemu-arm "$out/bin/qemu-arm-static"
+          '';
         in
         python.pkgs.buildPythonApplication {
           pname = "speculos";
@@ -212,7 +223,7 @@
             "--prefix"
             "PATH"
             ":"
-            (pkgs.lib.makeBinPath [ pkgs.qemu ])
+            (pkgs.lib.makeBinPath [ qemuStaticCompat ])
           ];
           # The upstream universal wheel pins Flask 2 and names the pygame
           # distribution even though pygame-ce supplies the compatible module
@@ -639,6 +650,7 @@
           default = pkgs.mkShell {
             LANG = "C.UTF-8";
             LC_ALL = "C.UTF-8";
+            CXXFLAGS = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "-std=c++17";
             packages = [
               aube
               dev
@@ -664,7 +676,9 @@
               self.packages.${system}.speculos
               self.packages.${system}.ledger-e2e-assets
               pkgs.python3Packages.fido2
-              pkgs.qemu
+              pkgs.qemu-user
+              pkgs.pkg-config
+              pkgs.systemd
             ];
             shellHook = ''
               aube install

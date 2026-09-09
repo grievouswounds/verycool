@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { AquaProtocolGateway, AuthService, LedgerWebAuthnService, OAuthService, PostgresActivityRepository, PostgresAuthStore, PostgresLedgerWebAuthnStore, PostgresTradingRepository, createDatabase, closeDatabase } from "@aqua/adapters";
 import { ActivityService, RpcActivityChain } from "@aqua/activity";
 import { loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
@@ -26,7 +27,13 @@ const auth=AuthService.withIssuer({
   publicKeysPaserk:manifest.auth.pasetoPublicKeys,accessTtlSeconds:defaults.accessTtlSeconds,
   refreshTtlSeconds:defaults.refreshTtlSeconds,
 },authStore,rpc,{issue:(grant)=>broker.issuePaseto({address:grant.address,sessionId:grant.sessionId,scopes:grant.scopes,amr:grant.amr??["siwe"],clientId:grant.clientId??"aqua-rest"})});
-const webauthn=new LedgerWebAuthnService(new PostgresLedgerWebAuthnStore(database),manifest.auth.rpId,manifest.auth.origin);
+const e2eAttestationRootIndex=Bun.argv.indexOf("--e2e-webauthn-root");
+const e2eAttestationRootPath=e2eAttestationRootIndex<0?undefined:Bun.argv[e2eAttestationRootIndex+1];
+if(e2eAttestationRootIndex>=0&&(Bun.env["AQUA_E2E"]!=="1"||manifest.chain.id!==31337||e2eAttestationRootPath===undefined))throw new Error("The E2E WebAuthn trust assembly is restricted to the explicit local-chain test runner");
+const webauthn=new LedgerWebAuthnService(
+  new PostgresLedgerWebAuthnStore(database),manifest.auth.rpId,manifest.auth.origin,
+  e2eAttestationRootPath===undefined?{}:{attestationRoots:[await readFile(e2eAttestationRootPath,"utf8")]},
+);
 const oauth=new OAuthService(database,manifest.auth.resource,(grant)=>broker.issuePaseto({address:grant.owner,sessionId:crypto.randomUUID(),scopes:grant.scopes,amr:["fido2","hwk"],clientId:grant.clientId}));
 const protocol=new ProtocolService({
   chainId:manifest.chain.id,aqua:manifest.contracts.aqua.address,

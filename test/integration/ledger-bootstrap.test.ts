@@ -44,7 +44,7 @@ fi`);
 const invoke = async (item: Awaited<ReturnType<typeof fixture>>, input = "password\npassword\n", environment: Record<string, string> = {}) => {
   const child = Bun.spawn(["bash", "scripts/ledger-bootstrap.sh"], {
     cwd: globalThis.process.cwd(), stdin: "pipe", stdout: "pipe", stderr: "pipe",
-    env: { ...Bun.env, ...environment, PATH: `${item.bin}:${Bun.env["PATH"] ?? ""}`, AQUA_STATE_DIR: item.state },
+    env: { ...Bun.env, AQUA_E2E: "0", ...environment, PATH: `${item.bin}:${Bun.env["PATH"] ?? ""}`, AQUA_STATE_DIR: item.state },
   });
   await child.stdin.write(input);
   await child.stdin.end();
@@ -77,7 +77,7 @@ describe("atomic Ledger keyring bootstrap", () => {
     for (const name of ["agent", "facilitator", "keeper", "paseto"]) {
       expect(await Bun.file(`${item.state}/keyring/${name}.enc`).exists()).toBe(true);
     }
-    expect(await Bun.file(`${item.root}/captured-agent`).text()).toMatch(/^[0-9a-f]{64}$/);
+    expect(await Bun.file(`${item.root}/captured-agent`).text()).toMatch(/^0x[0-9a-f]{64}$/);
     expect(await Bun.file(`${item.root}/captured-paseto`).text()).toMatch(/^k4\.secret\.[A-Za-z0-9_-]{86}$/);
     const second = await invoke(item, "");
     expect(second.exitCode).toBe(0);
