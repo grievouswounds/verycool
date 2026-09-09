@@ -9,7 +9,7 @@ started="$(date +%s)"
 test "$(grep -c '^[A-Z_][A-Z_]*=' .env.example)" -eq 4
 ! grep -R --exclude='.env' --exclude-dir='.git' --exclude-dir='bundle' --exclude-dir='dist' --exclude-dir='node_modules' --exclude-dir='.turbo' --exclude='aube-lock.yaml' -E 'PASETO_V4_SECRET_KEY|KEEPER_PRIVATE_KEY_FILE|AQUA_ADDRESS=' apps packages scripts >/dev/null
 bun scripts/dependency-policy.ts
-bun x tsc --noEmit
+aube run typecheck
 bun test
 (cd contracts && forge test --offline)
 nix flake check --no-build

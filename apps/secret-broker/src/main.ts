@@ -21,7 +21,7 @@ const ringDirectory = fixture ? null : argument("--ring-dir");
 
 const decrypt = async (name: string): Promise<string> => {
   if (ringDirectory === null) throw new Error("Ring directory is unavailable in fixture mode");
-  const process = Bun.spawn(["wallet-cli", "ring", "decrypt", "-i", `${ringDirectory}/${name}.enc`, "--key", name], {
+  const process = Bun.spawn([Bun.env["AQUA_WALLET_CLI"] ?? "wallet-cli", "ring", "decrypt", "-i", `${ringDirectory}/${name}.enc`, "--key", name], {
     stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
   const [stdout, stderr, exitCode] = await Promise.all([

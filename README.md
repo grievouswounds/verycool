@@ -23,22 +23,36 @@ It also monitors confirmed ERC-20 transfers for addresses selected by authentica
 
 ## Quick start
 
-Prerequisites are Nix with flakes enabled. The development shell provides Bun, Aube, PostgreSQL, Foundry/Anvil, Turbo, Process Compose, and Nix formatting tools; no local Docker, Bun, or Aube installation is required.
+Prerequisites are Nix with flakes enabled. The development shell provides Bun, Aube, PostgreSQL, Foundry/Anvil, Turbo, Process Compose, and Nix formatting tools; no local Bun or Aube installation is required. The emulated Ledger path on macOS and Windows uses Docker only as a Linux trampoline.
+
+There are two local stacks. Both start PostgreSQL, Anvil, the x402 facilitator, the API, and both workers. Only the key-custody source differs. The emulated path is local-only and is never production.
 
 ```sh
 nix develop -c dev
 ```
 
-On the first server run, connect an unlocked Ledger and quit Ledger Live. The launcher provisions the service broker keys, then starts PostgreSQL, Anvil, the x402 facilitator, the API, and both workers. The API listens on `http://localhost:8787`; open Swagger at `http://localhost:8787/docs` or check readiness at `http://localhost:8787/health/ready`.
+On the first physical-Ledger run, connect an unlocked Ledger and quit Ledger Live. The launcher provisions the service broker keys from the device. The API listens on `http://localhost:8787`; open Swagger at `http://localhost:8787/docs` or check readiness at `http://localhost:8787/health/ready`.
 
-Both `nix develop -c dev` and `nix run .#dev` use API hot reload. Use `aube run start` or `nix run .#start` for the same complete stack without hot reload. Run `ledger-bootstrap` inside the development shell for explicit device diagnostics or recovery.
+```sh
+nix develop -c dev-emulated
+```
+
+The emulated stack uses Speculos and the pinned Ledger Sync ELF. On Apple Silicon it runs `docker compose up --build` so the Linux-only emulator is available; inside that container the same `nix develop -c dev-emulated` command starts the stack. Windows (Docker Desktop / WSL2) should clone the repository on the WSL2 filesystem, then:
+
+```sh
+docker compose up --build
+```
+
+Raise the WSL2 memory allocation before the first image build; Speculos and the Ledger apps compile from source. Persist `WALLET_PASS` across restarts in the container data volume so the keyring stays decryptable.
+
+Both `nix develop -c dev` and `nix run .#dev` use API hot reload on the physical path. Use `nix develop -c start` / `nix run .#start` for that stack without hot reload, and `nix develop -c start-emulated` for the emulated equivalent. Run `nix develop -c ledger-bootstrap` for explicit device diagnostics or recovery.
 
 ## Toolchain
 
 - `nix develop` installs dependencies with Aube and exposes the complete toolchain without leaving background processes behind. The `dev`/`start` supervisor owns PostgreSQL initialization and migrations. Change dependencies only with Aube (`aube add`, `aube remove`); the lockfile is authoritative and produced by Aube 1.17.
 - Run `aube run check` for strict TypeScript, 100% type coverage, zero-`any` AST inspection, ESLint, tests, dependency policy, and the production bundle.
 - Run `aube run codegen:check` to verify the committed Cubane selector manifest.
-- Enter the reproducible shell with `nix develop`. `aube run dev`, `dev`, and `nix develop -c dev` all launch the complete hot-reload stack; `aube run start` launches its non-hot equivalent.
+- Enter the reproducible shell with `nix develop`. `aube run dev`, `dev`, and `nix develop -c dev` all launch the physical-Ledger hot-reload stack; `nix develop -c dev-emulated` launches the Speculos stack. `aube run start` and `nix develop -c start` launch the physical stack without hot reload.
 
 ### Command reference
 
@@ -84,9 +98,12 @@ Nix:
 ```sh
 nix flake check                    # evaluate and build checks for this system
 nix develop                         # enter the complete native toolchain
-nix develop -c dev                 # start the native development stack
-nix run .#dev                      # start the same stack without entering a shell
-nix run .#start                    # start the complete non-hot stack
+nix develop -c dev                 # physical Ledger development stack
+nix develop -c dev-emulated        # Speculos development stack (Docker on macOS)
+nix develop -c start               # physical Ledger stack, no hot reload
+nix develop -c start-emulated      # Speculos stack, no hot reload
+nix run .#dev                      # start the physical stack without entering a shell
+nix run .#start                    # start the complete non-hot physical stack
 nix run .#api -- --config /absolute/path/runtime-manifest.json # API only
 nix build .#api                    # build the API launcher
 nix build .#worker                 # build the activity-worker launcher

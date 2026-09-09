@@ -48,7 +48,7 @@ start_speculos() {
   local keep_alive="${2:-0}"
   local elf="$AQUA_LEDGER_E2E_ASSETS/apps/$app.elf"
   local probe_apdu probe_expect probe_name
-  local speculos_args=(--model nanosp --api-port 5000 --apdu-port 9999)
+  local speculos_args=(--model nanosp --display headless --api-port 5000 --apdu-port 9999)
   case "$app" in
     ledger-sync) probe_apdu=e004000000; probe_expect=4c65646765722053796e63; probe_name=get-app-name ;;
     ethereum) probe_apdu=e006000000; probe_expect=9000; probe_name=get-app-configuration ;;

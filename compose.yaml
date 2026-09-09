@@ -1,7 +1,11 @@
-# compose.yaml
 services:
   aqua:
-    image: nixos/nix:2.28.3
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
     working_dir: /workspace
     privileged: true
     environment:
@@ -15,20 +19,23 @@ services:
       AQUA_FACILITATOR_PORT: "8788"
       AQUA_LOCAL_RPC_URL: http://127.0.0.1:8545
       DATABASE_URL: postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend
+      AQUA_EMULATED_INNER: "1"
     volumes:
       - .:/workspace
       - nix-store:/nix
       - aqua-data:/workspace/.data
+      - aqua-node-modules:/workspace/node_modules
+      - aqua-aube-cache:/home/aqua/.cache/aube
+      - aqua-aube-store:/home/aqua/.local/share/aube
     ports:
       - "8787:8787"
       - "8788:8788"
-    command:
-      - nix
-      - run
-      - --impure
-      - .#dev
-    restart: unless-stopped
+      - "5000:5000"
+    command: ["dev-emulated"]
 
 volumes:
   nix-store:
   aqua-data:
+  aqua-node-modules:
+  aqua-aube-cache:
+  aqua-aube-store:

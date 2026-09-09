@@ -234,14 +234,54 @@
           pythonImportsCheck = [ "speculos" ];
           doCheck = false;
         };
-      devStack =
-        pkgs: aube: aqua: swapvm: x402: permit2: commandName: hotReload:
+      indentLines =
+        n: text:
         let
+          pad = nixpkgs.lib.concatStrings (nixpkgs.lib.genList (_: " ") n);
+        in
+        nixpkgs.lib.concatMapStringsSep "\n" (line: if line == "" then "" else pad + line) (
+          nixpkgs.lib.splitString "\n" text
+        );
+      devStack =
+        pkgs: aube: aqua: swapvm: x402: permit2: commandName: hotReload: ledgerMode:
+        let
+          emulated = ledgerMode == "emulated";
+          emulatedProcesses = ''
+            speculos:
+              command: >-
+                if [ -z "''${AQUA_SPECULOS_BIN:-}" ] || [ -z "''${AQUA_LEDGER_E2E_ASSETS:-}" ]; then
+                  echo "Run through nix develop so the pinned Ledger ELFs and Speculos executable are available" >&2;
+                  exit 1;
+                fi;
+                exec "''${AQUA_SPECULOS_BIN}" --model nanosp --display headless --api-port 5000 --apdu-port 9999
+                --seed "glory promote mansion idle axis finger extra february uncover one trip resource lawn turtle enact monster seven myth punch hobby comfort wild raise skin"
+                "''${AQUA_LEDGER_E2E_ASSETS}/apps/ledger-sync.elf"
+              readiness_probe:
+                exec:
+                  command: curl -fsS http://127.0.0.1:5000/events >/dev/null
+                initial_delay_seconds: 1
+                period_seconds: 1
+                timeout_seconds: 2
+                success_threshold: 1
+                failure_threshold: 60
+
+            ledger-bootstrap:
+              command: bash "''${AQUA_ROOT}/scripts/ledger-bootstrap.sh"
+              depends_on:
+                speculos:
+                  condition: process_healthy
+          '';
+          emulatedBrokerDepends = ''
+            depends_on:
+              ledger-bootstrap:
+                condition: process_completed_successfully
+          '';
           processComposeConfig = pkgs.writeText "aqua-process-compose.yaml" ''
             version: "0.5"
             ordered_shutdown: true
 
             processes:
+            ${if emulated then indentLines 2 emulatedProcesses else ""}
               postgresql:
                 # Reuse an explicitly user-managed server already listening on the configured
                 # local port; otherwise Process Compose owns PostgreSQL and shuts it down with
@@ -286,16 +326,17 @@
                   failure_threshold: 30
 
               secret-broker:
-                # Real, Ledger-backed mode only: the launcher runs ledger-bootstrap before the
-                # supervisor, producing or validating the encrypted keyring. "--config" is read lazily
-                # on the broker's first real signing request, so it is safe to point at a
-                # manifest that "manifest-generate" below has not written yet.
+                # Physical mode: the launcher runs ledger-bootstrap before the supervisor.
+                # Emulated mode: ledger-bootstrap is a process that waits for Speculos.
+                # "--config" is read lazily on the broker's first real signing request, so it is
+                # safe to point at a manifest that "manifest-generate" below has not written yet.
                 command: >-
                   bun "$${AQUA_ROOT}/apps/secret-broker/src/main.ts"
                   --socket "$${AQUA_STATE_DIR}/secret-broker.sock"
                   --identity-out "$${AQUA_STATE_DIR}/identity.json"
                   --config "$${AQUA_STATE_DIR}/runtime-manifest.json"
                   --ring-dir "$${AQUA_STATE_DIR}/keyring"
+            ${if emulated then indentLines 4 emulatedBrokerDepends else ""}
                 readiness_probe:
                   exec:
                     command: >-
@@ -447,8 +488,49 @@
             export AQUA_BROKER_SOCKET="''${AQUA_BROKER_SOCKET:-$AQUA_STATE_DIR/secret-broker.sock}"
             export AQUA_API_PORT="''${AQUA_API_PORT:-8787}"
             export AQUA_FACILITATOR_PORT="''${AQUA_FACILITATOR_PORT:-8788}"
+            ${
+              if emulated then
+                ''
+                  if [ "$(uname -s)" = Darwin ] && [ "''${AQUA_EMULATED_INNER:-0}" != 1 ]; then
+                    command -v docker >/dev/null || { echo "Docker is required for the Linux Speculos development environment" >&2; exit 1; }
+                    export UID
+                    GID="$(id -g)"
+                    export GID
+                    exec docker compose up --build
+                  fi
+                  if [ "$(uname -s)" != Linux ]; then
+                    echo "emulated Ledger inner runner requires Linux" >&2
+                    exit 1
+                  fi
+                  if [ -z "''${AQUA_SPECULOS_BIN:-}" ] || [ -z "''${AQUA_LEDGER_E2E_ASSETS:-}" ]; then
+                    echo "Run through nix develop so the pinned Ledger ELFs and Speculos executable are available" >&2
+                    exit 1
+                  fi
+                  export AQUA_E2E=1
+                  export AQUA_WALLET_CLI="''${AQUA_WALLET_CLI:-$AQUA_ROOT/test/e2e/wallet-cli-adapter.ts}"
+                  export AQUA_E2E_LKRP_STATE="''${AQUA_E2E_LKRP_STATE:-$AQUA_STATE_DIR/lkrp}"
+                  export AQUA_SPECULOS_URL="''${AQUA_SPECULOS_URL:-http://127.0.0.1:5000}"
+                  mkdir -p "$AQUA_STATE_DIR"
+                  if [ ! -f "$AQUA_STATE_DIR/wallet-pass" ]; then
+                    umask 077
+                    openssl rand -hex 32 > "$AQUA_STATE_DIR/wallet-pass"
+                    chmod 600 "$AQUA_STATE_DIR/wallet-pass"
+                  fi
+                  WALLET_PASS="$(cat "$AQUA_STATE_DIR/wallet-pass")"
+                  export WALLET_PASS
+                ''
+              else
+                ""
+            }
             aube install
-            bash "$AQUA_ROOT/scripts/ledger-bootstrap.sh"
+            ${
+              if emulated then
+                ""
+              else
+                ''
+                  bash "$AQUA_ROOT/scripts/ledger-bootstrap.sh"
+                ''
+            }
             rm -f "$AQUA_STATE_DIR/activity-worker.ready" "$AQUA_STATE_DIR/order-worker.ready"
             if [ ! -d "$AQUA_STATE_DIR/postgresql" ]; then
               initdb -D "$AQUA_STATE_DIR/postgresql" --auth=trust
@@ -466,8 +548,10 @@
           api = appProgram pkgs "aqua-api" "apps/api/src/main.ts";
           worker = appProgram pkgs "aqua-activity-worker" "apps/worker/src/main.ts";
           orderWorker = appProgram pkgs "aqua-order-worker" "apps/order-worker/src/main.ts";
-          dev = devStack pkgs aube aqua swapvm x402 permit2 "dev" true;
-          start = devStack pkgs aube aqua swapvm x402 permit2 "aqua-start" false;
+          dev = devStack pkgs aube aqua swapvm x402 permit2 "dev" true "physical";
+          start = devStack pkgs aube aqua swapvm x402 permit2 "aqua-start" false "physical";
+          devEmulated = devStack pkgs aube aqua swapvm x402 permit2 "dev-emulated" true "emulated";
+          startEmulated = devStack pkgs aube aqua swapvm x402 permit2 "start-emulated" false "emulated";
           checkLocal = pkgs.writeShellApplication {
             name = "check-local";
             runtimeInputs = [
@@ -536,6 +620,8 @@
             worker
             dev
             start
+            devEmulated
+            startEmulated
             checkLocal
             ledgerBootstrap
             e2e
@@ -588,6 +674,14 @@
             type = "app";
             program = "${packages.start}/bin/aqua-start";
           };
+          dev-emulated = {
+            type = "app";
+            program = "${packages.devEmulated}/bin/dev-emulated";
+          };
+          start-emulated = {
+            type = "app";
+            program = "${packages.startEmulated}/bin/start-emulated";
+          };
           worker = {
             type = "app";
             program = "${packages.worker}/bin/aqua-activity-worker";
@@ -632,6 +726,7 @@
           dependency-policy = pkgs.runCommand "dependency-policy" { } ''
             ! grep -E '(^|[/@])(ethers|web3)(@|:)' ${./aube-lock.yaml}
             ! grep -E '"(viem|ethers|web3)"[[:space:]]*:' ${./package.json}
+            ! grep -RInE '(^|[^a-zA-Z0-9_-])(npm|npx|yarn|pnpm)([^a-zA-Z0-9_-]|$)' ${./scripts} ${./apps} ${./packages}
             touch $out
           '';
         }
@@ -642,8 +737,10 @@
         let
           pkgs = pkgsFor system;
           aube = aube171 pkgs;
-          dev = devStack pkgs aube aqua swapvm x402 permit2 "dev" true;
-          start = devStack pkgs aube aqua swapvm x402 permit2 "aqua-start" false;
+          dev = self.packages.${system}.dev;
+          start = self.packages.${system}.start;
+          devEmulated = self.packages.${system}.devEmulated;
+          startEmulated = self.packages.${system}.startEmulated;
           ledgerBootstrap = self.packages.${system}.ledgerBootstrap;
         in
         {
@@ -655,13 +752,16 @@
               aube
               dev
               start
+              devEmulated
+              startEmulated
               ledgerBootstrap
+              self.packages.${system}.checkLocal
               self.packages.${system}.e2e
               self.packages.${system}.e2eBazanticCanary
               self.packages.${system}.e2eAll
               pkgs.bun
+              # Build-time only: node-hid and usb may invoke node-gyp/prebuild-install.
               pkgs.nodejs
-              pkgs.yarn
               pkgs.gnumake
               pkgs.jq
               pkgs.git
