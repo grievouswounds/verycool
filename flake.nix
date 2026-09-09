@@ -535,7 +535,11 @@
             if [ ! -d "$AQUA_STATE_DIR/postgresql" ]; then
               initdb -D "$AQUA_STATE_DIR/postgresql" --auth=trust
             fi
-            exec process-compose --ordered-shutdown -f ${processComposeConfig}
+            tui_args=()
+            if [ ! -t 1 ]; then
+              tui_args+=(-t=false)
+            fi
+            exec process-compose --ordered-shutdown "''${tui_args[@]}" -f ${processComposeConfig}
           '';
         };
     in

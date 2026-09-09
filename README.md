@@ -37,7 +37,7 @@ On the first physical-Ledger run, connect an unlocked Ledger and quit Ledger Liv
 nix develop -c dev-emulated
 ```
 
-The emulated stack uses Speculos and the pinned Ledger Sync ELF. On Apple Silicon it runs `docker compose up --build` so the Linux-only emulator is available; inside that container the same `nix develop -c dev-emulated` command starts the stack. Windows (Docker Desktop / WSL2) should clone the repository on the WSL2 filesystem, then:
+The emulated stack uses Speculos and the pinned Ledger Sync ELF. On Apple Silicon it runs `docker compose up --build` so the Linux-only emulator is available; inside that container the same `nix develop -c dev-emulated` command starts the stack. Speculos's HTTP UI is published on host port `15000` (mapped to container `5000`) so it does not collide with macOS services on port 5000. Windows (Docker Desktop / WSL2) should clone the repository on the WSL2 filesystem, then:
 
 ```sh
 docker compose up --build
