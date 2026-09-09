@@ -17,6 +17,76 @@
         "type": "github"
       }
     },
+    "ledger-ethereum": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1787836207,
+        "narHash": "sha256-uegUGCkker/mASmG0idNCwqoImK5OISsAi2Sc+NB80s=",
+        "ref": "refs/heads/develop",
+        "rev": "e5b6dbff3aca3e3c97a1079c8dccbd1dafdb32c7",
+        "revCount": 3739,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/LedgerHQ/app-ethereum"
+      },
+      "original": {
+        "rev": "e5b6dbff3aca3e3c97a1079c8dccbd1dafdb32c7",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/LedgerHQ/app-ethereum"
+      }
+    },
+    "ledger-secure-sdk": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788852638,
+        "narHash": "sha256-u5HjvLMrT9DRXM0/014Xhyttrpq/viaCwuTTHpLPjf4=",
+        "owner": "LedgerHQ",
+        "repo": "ledger-secure-sdk",
+        "rev": "7f80658e0e937952ca805849e4e561539db33385",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LedgerHQ",
+        "repo": "ledger-secure-sdk",
+        "rev": "7f80658e0e937952ca805849e4e561539db33385",
+        "type": "github"
+      }
+    },
+    "ledger-security-key": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786710230,
+        "narHash": "sha256-oelPotKxlDd+imHiN0z2gIdUPjTepPP8pEgMYgALinY=",
+        "owner": "LedgerHQ",
+        "repo": "app-security-key",
+        "rev": "a4d0dd24bdeee8de4a62ae146ad735b5c41a50e8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LedgerHQ",
+        "repo": "app-security-key",
+        "rev": "a4d0dd24bdeee8de4a62ae146ad735b5c41a50e8",
+        "type": "github"
+      }
+    },
+    "ledger-sync": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788534231,
+        "narHash": "sha256-cZlVJa7GuoYqW2QM3FgpRDjTne1ZfnEzOyWzjFYd2W4=",
+        "owner": "LedgerHQ",
+        "repo": "app-ledger-sync",
+        "rev": "0838f1c1a1c591be7fe9f977c265cd3f45d58a9c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LedgerHQ",
+        "repo": "app-ledger-sync",
+        "rev": "0838f1c1a1c591be7fe9f977c265cd3f45d58a9c",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1788614874,
@@ -55,10 +125,32 @@
     "root": {
       "inputs": {
         "aqua": "aqua",
+        "ledger-ethereum": "ledger-ethereum",
+        "ledger-secure-sdk": "ledger-secure-sdk",
+        "ledger-security-key": "ledger-security-key",
+        "ledger-sync": "ledger-sync",
         "nixpkgs": "nixpkgs",
         "permit2": "permit2",
+        "speculos-src": "speculos-src",
         "swapvm": "swapvm",
         "x402": "x402"
+      }
+    },
+    "speculos-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788884060,
+        "narHash": "sha256-ojKCA+Q+9ZiWDr6e8Omx+UootBITMSee/5UeyCKG4Wg=",
+        "owner": "LedgerHQ",
+        "repo": "speculos",
+        "rev": "b8223017fd831663fd3e3fcf83f85ba234970615",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LedgerHQ",
+        "repo": "speculos",
+        "rev": "b8223017fd831663fd3e3fcf83f85ba234970615",
+        "type": "github"
       }
     },
     "swapvm": {

@@ -23,5 +23,9 @@ export default defineConfig(
       "@typescript-eslint/require-await": "off"
     }
   },
+  {
+    files: ["apps/mcp-bridge/src/ledger-runtime.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+  },
   { ignores: ["**/dist/**", "apps/*/bundle/**", "node_modules/**", "result*/**"] }
 );

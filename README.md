@@ -95,7 +95,7 @@ nix build .#order-worker           # build the order-book-worker launcher
 
 The native packages and development shell are available on every supported flake system, including Apple Silicon macOS.
 
-Cubane 0.3.12 is the first-party EVM boundary. The API, workers, contracts adapter, local LKRP signer, and x402 facilitator never import viem, ethers, web3, or the 1inch SDK. The pinned `@x402/evm` package currently retains viem as an internal implementation dependency; removing it from the transitive graph requires a maintained fork or replacement of that pinned package.
+Cubane 0.3.12 is the first-party EVM boundary. The API, workers, contracts adapter, local LKRP signer, and x402 facilitator never import viem, ethers, web3, or the 1inch SDK. The pinned `@x402/evm` package currently retains viem internally, while Ledger's pinned device-management signer toolkit retains ethers internally; removing either from the transitive graph requires a maintained fork or replacement of the corresponding pinned package.
 
 ## API
 
@@ -196,6 +196,14 @@ Rotate access-token keys by deploying the new public key to every verifier first
 `ACTIVITY_CONFIRMATIONS` is required and must be chosen for the configured chain. Collection defaults to a 60-second interval, 1,000-block chunks, four concurrent subscriptions, a 120-second lease, and 100 active subscriptions per authenticated wallet. The worker and API must use the same RPC, PostgreSQL database, chain, and confirmation configuration.
 
 `dev` and `start` persist PostgreSQL, Anvil state, deployment evidence, encrypted keys, and the verified runtime manifest under the gitignored `.data` directory. The local chain is fixed to chain ID 31337. Its manifest contains Aqua, both SwapVM routers, WETH9, the intent controller, vault factory, BoundedMatcher, canonical Permit2, canonical x402 exact proxy, and two differently-decimalled fixture tokens. Startup blocks the API until code hashes, constructor bindings, operators, matcher permissions, fixture metadata/supply, seed receipts, and canonical addresses all verify.
+
+## Speculos end-to-end evidence
+
+Run `nix develop -c e2e` for the deterministic Linux suite, `nix develop -c e2e-bazantic-canary` for the free live Bazantic discovery check, or `nix develop -c e2e-all` for both. On macOS the command enters a Linux container whose test environment is still constructed by `nix develop`; Linux runs directly. The deterministic suite builds pinned Nano S+ Ledger Sync, Ethereum, and Security Key applications, runs each in Speculos with one deterministic seed, deploys the pinned upstream Aqua/SwapVM contracts on an isolated Anvil chain, and writes code, receipt, call-trace, APDU, and tool-catalog evidence under `reports/e2e/`.
+
+The Bazantic canary requires `AQUA_BAZANTIC_GATEWAY_SLUG`. It resolves the listing through `https://bazgateway.com/mcp/` and calls only the catalog-issued MCP `tools/list`; it never performs `tools/call` or sends a payment header. Aqua x402 remains exact Permit2 funding in the trade's arbitrary standard ERC-20 sell token, on the deployment chain.
+
+Speculos executes real Ledger application binaries and is suitable for application protocol and cryptographic-flow testing. It does not emulate physical USB, Ledger firmware, the Secure Element, or hardware security properties, so a passing suite is not a hardware-attestation claim. Production continues to use node-HID and the released `wallet-cli`; the Speculos transport, test attestation material, and wallet adapter require `AQUA_E2E=1`.
 
 The deployment is reused only when the entire recorded set and both deterministic seeded orders remain valid. Missing code, stale runtime hashes, wrong bindings, or incomplete evidence cause a complete redeployment and regenerated manifest. An incomplete `.data/keyring` is never overwritten: move it aside for forensic recovery or restore all four `agent.enc`, `facilitator.enc`, `keeper.enc`, and `paseto.enc` files, then run `ledger-bootstrap` again. For API-only operation, bypass the local supervisor explicitly with `nix run .#api -- --config <runtime-manifest.json>`.
 

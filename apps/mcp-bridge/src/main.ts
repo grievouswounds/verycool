@@ -6,13 +6,16 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { PayingHttpClient, parseHttpJson } from "@aqua/bazantic";
 import {
-  addressSchema, hashSchema, hexSchema, localProfileDefaults, quantitySchema, subscribedTradesWipeSchema,
+  addressSchema, formatTokenAmount, hashSchema, hexSchema, localProfileDefaults, quantitySchema, subscribedTradesWipeSchema,
   tradePreviewRequestSchema, tradesListQuerySchema,
 } from "@aqua/core";
 import type { Address, Hash, Hex } from "@aqua/core";
 import { hexToQuantity, JsonRpcClient } from "@aqua/evm";
 import { z } from "zod";
 import { oauthAccessToken } from "./oauth.ts";
+import { signLedgerTypedData } from "./ledger.ts";
+import { retryAquaPayment } from "./payment.ts";
+import { discoverConfiguredAquaTools } from "./bazantic-tools.ts";
 
 const configurationSchema = z.object({
   apiUrl: z.url(), rpcUrl: z.url(), agent: addressSchema, signerProgram: z.string().min(1),
@@ -46,6 +49,12 @@ const config = configurationSchema.parse({
   oauthCallbackPort: Number(Bun.env["AQUA_OAUTH_CALLBACK_PORT"] ?? "41739"),
 });
 const rpc = new JsonRpcClient(new URL(config.rpcUrl), localProfileDefaults.rpcTimeoutMs);
+const bazanticEvidence = await discoverConfiguredAquaTools();
+if (bazanticEvidence !== null) console.error(JSON.stringify({
+  level: "info", component: "aqua-mcp", message: "Bazantic Aqua tool catalog verified",
+  gatewaySlug: bazanticEvidence.gatewaySlug, mcpUrl: bazanticEvidence.mcpUrl,
+  fingerprints: bazanticEvidence.fingerprints,
+}));
 const accessToken = await oauthAccessToken(config.apiUrl, config.oauthCachePath, config.oauthCallbackPort);
 
 const signTypedData = async (typedData: Readonly<Record<string, unknown>>): Promise<`0x${string}`> => {
@@ -98,6 +107,15 @@ const executePrerequisites = async (preview: Readonly<Record<string, unknown>>):
   return hashes;
 };
 
+const delegationContextSchema = z.object({
+  owner: addressSchema,
+  normalizedTrade: z.object({ sellToken: addressSchema }).loose(),
+  tokens: z.object({ sell: z.object({ decimals: z.number().int().min(0).max(255) }).loose() }).loose(),
+  execution: z.object({ fundingAmountUnits: z.string().regex(/^(?:0|[1-9][0-9]*)$/u) }).loose(),
+}).loose();
+const delegationPreviewSchema = z.object({ previewId: z.uuid(), previewHash: hashSchema, typedData: z.record(z.string(), z.unknown()) }).loose();
+const delegationSubmissionSchema = z.object({ transactionHash: hashSchema }).loose();
+
 const http = new PayingHttpClient({
   signer: {
     address: clientAddressSchema.parse(config.agent),
@@ -114,6 +132,23 @@ const json = async (response: Response): Promise<unknown> => {
   return body;
 };
 const output = (body: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(body) }], structuredContent: typeof body === "object" && body !== null ? z.record(z.string(), z.unknown()).parse(body) : { result: body } });
+
+const ensureDelegation = async (preview: Readonly<Record<string, unknown>>): Promise<Hash> => {
+  const context = delegationContextSchema.parse(preview);
+  const amount = formatTokenAmount(BigInt(context.execution.fundingAmountUnits), context.tokens.sell.decimals);
+  const created = delegationPreviewSchema.parse(await json(await api("/v1/delegations/previews", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+      agent: config.agent, token: context.normalizedTrade.sellToken, maxPerOrder: amount, maxPerDay: amount,
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    }),
+  })));
+  const ownerSignature = await signLedgerTypedData(context.owner, created.typedData);
+  const submitted = delegationSubmissionSchema.parse(await json(await api("/v1/delegations", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ previewId: created.previewId, previewHash: created.previewHash, ownerSignature }),
+  })));
+  await waitForReceipt(submitted.transactionHash); return submitted.transactionHash;
+};
 
 const ensureAgentBinding = async (): Promise<void> => {
   const challengeResponse = await api("/v1/agents/me/challenges", {
@@ -149,12 +184,18 @@ const postTrade = async (arguments_: unknown) => {
   const body = JSON.stringify({ previewId, previewHash, lifecycleSignature: signature });
   const headers = new Headers({ "content-type": "application/json", "idempotency-key": previewId });
   headers.set("authorization", `Bearer ${accessToken}`);
-  const validation = await api("/v1/trades", { method: "POST", headers, body });
+  let validation = await api("/v1/trades", { method: "POST", headers, body });
+  if (validation.status === 409) {
+    const validationResult = await parseHttpJson(validation);
+    const error = z.object({ type: z.string() }).loose().safeParse(validationResult.body);
+    if (!error.success || error.data.type !== "urn:aqua:error:delegation-required") throw new Error(`Aqua API 409: ${JSON.stringify(validationResult.body)}`);
+    await ensureDelegation(preview); validation = await api("/v1/trades", { method: "POST", headers, body });
+  }
   if (validation.status !== 402) return output(await json(validation));
   const prerequisiteTransactionHashes = await executePrerequisites(preview);
   headers.set("aqua-prerequisite-transactions", Buffer.from(JSON.stringify(prerequisiteTransactionHashes)).toString("base64url"));
   const network = `eip155:${chainIdSchema.parse(preview["chainId"])}` as const;
-  const response = await http.retryAqua(validation, new URL("/v1/trades", config.apiUrl), { method: "POST", headers, body }, network);
+  const response = await retryAquaPayment(http, validation, new URL("/v1/trades", config.apiUrl), { method: "POST", headers, body }, network);
   return output(await json(response));
 };
 const getTrades = async (arguments_: unknown) => {

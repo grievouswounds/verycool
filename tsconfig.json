@@ -24,6 +24,8 @@
     "baseUrl": ".",
     "paths": {
       "@aqua/core": ["packages/core/src/index.ts"],
+      "@aqua/core/schemas": ["packages/core/src/schemas.ts"],
+      "@aqua/core/types": ["packages/core/src/types.ts"],
       "@aqua/evm": ["packages/evm/src/index.ts"],
       "@aqua/contracts": ["packages/contracts/src/index.ts"],
       "@aqua/adapters": ["packages/adapters/src/index.ts"],

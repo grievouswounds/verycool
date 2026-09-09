@@ -6,10 +6,16 @@ const packageSchema = z.object({
 }).loose();
 
 const packageJson = packageSchema.parse(await Bun.file("package.json").json());
-const directNames = [...Object.keys(packageJson.dependencies ?? {}), ...Object.keys(packageJson.devDependencies ?? {})];
+const workspacePackageJsons: z.infer<typeof packageSchema>[] = [];
+for await (const path of new Bun.Glob("{apps,packages}/*/package.json").scan(".")) {
+  workspacePackageJsons.push(packageSchema.parse(await Bun.file(path).json()));
+}
+const directNames = [packageJson, ...workspacePackageJsons].flatMap((manifest) => [
+  ...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.devDependencies ?? {}),
+]);
 const lock = await Bun.file("aube-lock.yaml").text();
 const directForbidden = ["viem", "ethers", "web3", "@1inch/aqua-sdk", "@1inch/swap-vm-sdk"] as const;
-const transitivelyForbidden = ["ethers", "web3", "@1inch/aqua-sdk", "@1inch/swap-vm-sdk"] as const;
+const transitivelyForbidden = ["web3", "@1inch/aqua-sdk", "@1inch/swap-vm-sdk"] as const;
 const found = [
   ...directForbidden.filter((name) => directNames.includes(name)),
   ...transitivelyForbidden.filter((name) => lock.includes(`/${name}@`) || lock.includes(`${name}:`)),

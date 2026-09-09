@@ -8,10 +8,10 @@
     "aqua-mcp-signer": "src/signer.ts"
   },
   "scripts": {
-    "build": "bun build src/main.ts src/signer.ts --target=bun --outdir=dist",
+    "build": "bun build src/main.ts src/signer.ts src/ledger.ts src/ledger-runtime.mjs src/bazantic-tools.ts --target=bun --outdir=dist",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test"
   },
   "aube": {
     "allowBuilds": {
@@ -24,6 +24,7 @@
     "@ledgerhq/device-management-kit": "1.9.0",
     "@ledgerhq/device-signer-kit-ethereum": "1.18.0",
     "@ledgerhq/device-transport-kit-node-hid": "1.0.1",
+    "@ledgerhq/device-transport-kit-speculos": "1.2.1",
     "rxjs": "7.8.2"
   }
 }

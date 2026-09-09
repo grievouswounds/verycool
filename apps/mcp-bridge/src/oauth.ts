@@ -32,6 +32,13 @@ const tokenRequest = async (apiUrl: string, values: Readonly<Record<string, stri
   return tokenSchema.parse(await json(response));
 };
 const launchBrowser = (url: string): void => {
+  const e2eDriver = Bun.env["AQUA_E2E_OAUTH_DRIVER"];
+  if (e2eDriver !== undefined) {
+    if (Bun.env["AQUA_E2E"] !== "1") throw new Error("AQUA_E2E_OAUTH_DRIVER is restricted to AQUA_E2E=1");
+    const child = Bun.spawn([e2eDriver, url], { stdin: "ignore", stdout: "ignore", stderr: "inherit", env: Bun.env });
+    void child.exited.then((code) => { if (code !== 0) console.error(`E2E OAuth driver exited with ${String(code)}`); });
+    return;
+  }
   const command = process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["cmd", "/c", "start", "", url] : ["xdg-open", url];
   const child = Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   void child.exited.catch(() => undefined);

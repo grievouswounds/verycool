@@ -25,6 +25,26 @@
     url = "git+https://github.com/Uniswap/permit2?rev=cc56ad0f3439c502c246fc5cfcc3db92bb8b7219&submodules=1";
     flake = false;
   };
+  inputs.speculos-src = {
+    url = "github:LedgerHQ/speculos/b8223017fd831663fd3e3fcf83f85ba234970615";
+    flake = false;
+  };
+  inputs.ledger-secure-sdk = {
+    url = "github:LedgerHQ/ledger-secure-sdk/7f80658e0e937952ca805849e4e561539db33385";
+    flake = false;
+  };
+  inputs.ledger-security-key = {
+    url = "github:LedgerHQ/app-security-key/a4d0dd24bdeee8de4a62ae146ad735b5c41a50e8";
+    flake = false;
+  };
+  inputs.ledger-sync = {
+    url = "github:LedgerHQ/app-ledger-sync/0838f1c1a1c591be7fe9f977c265cd3f45d58a9c";
+    flake = false;
+  };
+  inputs.ledger-ethereum = {
+    url = "git+https://github.com/LedgerHQ/app-ethereum?rev=e5b6dbff3aca3e3c97a1079c8dccbd1dafdb32c7&submodules=1";
+    flake = false;
+  };
 
   outputs =
     {
@@ -34,6 +54,11 @@
       swapvm,
       x402,
       permit2,
+      speculos-src,
+      ledger-secure-sdk,
+      ledger-security-key,
+      ledger-sync,
+      ledger-ethereum,
     }:
     let
       systems = [
@@ -81,6 +106,122 @@
             export LC_ALL=C.UTF-8
             exec bun "$PWD/${source}" "$@"
           '';
+        };
+      ledgerRevision = {
+        speculos = "b8223017fd831663fd3e3fcf83f85ba234970615";
+        securityKey = "a4d0dd24bdeee8de4a62ae146ad735b5c41a50e8";
+        ledgerSync = "0838f1c1a1c591be7fe9f977c265cd3f45d58a9c";
+        ethereum = "e5b6dbff3aca3e3c97a1079c8dccbd1dafdb32c7";
+        secureSdk = "7f80658e0e937952ca805849e4e561539db33385";
+      };
+      ledgeredPackage =
+        pkgs:
+        pkgs.python3.pkgs.buildPythonPackage {
+          pname = "ledgered";
+          version = "0.14.0";
+          format = "wheel";
+          src = pkgs.fetchurl {
+            url = "https://files.pythonhosted.org/packages/3f/a8/4f896aa525133c69bc3f2399eb190002e10bbe3528c76b3165fd31d728b8/ledgered-0.14.0-py3-none-any.whl";
+            hash = "sha256-qPMi2SBJWVnvCfkgUR856j/DG6hx6+TMlrswP/RboZU=";
+          };
+          dependencies = with pkgs.python3.pkgs; [
+            pydantic
+            pyelftools
+            pygithub
+            tomli
+          ];
+          doCheck = false;
+        };
+      ledgerApp =
+        pkgs: name: source: extraMakeFlags:
+        pkgs.stdenv.mkDerivation {
+          pname = "ledger-${name}-nanos-plus";
+          version = "git";
+          src = source;
+          nativeBuildInputs = [
+            pkgs.gcc-arm-embedded
+            pkgs.llvmPackages.clang-unwrapped
+            pkgs.llvmPackages.lld
+            pkgs.llvmPackages.llvm
+            pkgs.gnumake
+            pkgs.git
+            (pkgs.python3.withPackages (python: [ python.pillow ]))
+            (ledgeredPackage pkgs)
+            pkgs.jq
+            pkgs.which
+          ];
+          BOLOS_SDK = ledger-secure-sdk;
+          TARGET = "nanos2";
+          enableParallelBuilding = true;
+          buildPhase = ''
+            runHook preBuild
+            if [ ! -d .git ]; then
+              git init --quiet
+              git config user.name "Aqua reproducible Ledger build"
+              git config user.email "e2e@aqua.invalid"
+              git add --all
+              GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" \
+                git commit --quiet --message source
+            fi
+            make SHELL=${pkgs.bash}/bin/bash CLANGPATH=${pkgs.llvmPackages.clang-unwrapped}/bin/ DEBUG=1 ${extraMakeFlags} build/nanos2/bin/app.elf
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out/share/ledger-apps"
+            app_elf="$(find build -type f -name app.elf -print -quit)"
+            test -n "$app_elf"
+            cp "$app_elf" "$out/share/ledger-apps/${name}.elf"
+            runHook postInstall
+          '';
+        };
+      speculosPackage =
+        pkgs:
+        let
+          python = pkgs.python3;
+          ledgered = ledgeredPackage pkgs;
+        in
+        python.pkgs.buildPythonApplication {
+          pname = "speculos";
+          version = "0.27.0";
+          format = "wheel";
+          src = pkgs.fetchurl {
+            url = "https://files.pythonhosted.org/packages/b9/b5/adf12e3040a5671fe1c93d00f3a5f8822b95bdb172d3d4951c30e110393a/speculos-0.27.0-py3-none-any.whl";
+            hash = "sha256-dIv0CuC72INM3IqxcX1r493M6lObc6YLvHzLySePyYI=";
+          };
+          nativeBuildInputs = [
+            pkgs.autoPatchelfHook
+            pkgs.makeWrapper
+          ];
+          buildInputs = [ pkgs.libvncserver ];
+          dependencies = with python.pkgs; [
+            construct
+            flask
+            flask-restful
+            flask-cors
+            jsonschema
+            mnemonic
+            pillow
+            pyelftools
+            pyqt6
+            requests
+            pygame
+            ledgered
+          ];
+          makeWrapperArgs = [
+            "--prefix"
+            "PATH"
+            ":"
+            (pkgs.lib.makeBinPath [ pkgs.qemu ])
+          ];
+          # The upstream universal wheel pins Flask 2 and names the pygame
+          # distribution even though pygame-ce supplies the compatible module
+          # in nixpkgs. Relax/remove only that stale wheel metadata; import
+          # checks below still verify the assembled closure.
+          pythonRelaxDeps = [ "flask" ];
+          pythonRemoveDeps = [ "pygame" ];
+          pythonImportsCheck = [ "speculos" ];
+          doCheck = false;
         };
       devStack =
         pkgs: aube: aqua: swapvm: x402: permit2: commandName: hotReload:
@@ -322,6 +463,7 @@
               aube
               pkgs.bun
               pkgs.foundry
+              pkgs.curl
               pkgs.git
               pkgs.jq
               pkgs.nix
@@ -344,6 +486,36 @@
               exec bash "$PWD/scripts/ledger-bootstrap.sh" "$@"
             '';
           };
+          e2e = pkgs.writeShellApplication {
+            name = "e2e";
+            runtimeInputs = [
+              pkgs.bash
+              pkgs.coreutils
+              pkgs.git
+              pkgs.nix
+            ];
+            text = ''exec bash "$PWD/scripts/e2e.sh" deterministic "$@"'';
+          };
+          e2eBazanticCanary = pkgs.writeShellApplication {
+            name = "e2e-bazantic-canary";
+            runtimeInputs = [
+              pkgs.bash
+              pkgs.bun
+              pkgs.coreutils
+            ];
+            text = ''exec bash "$PWD/scripts/e2e.sh" bazantic-canary "$@"'';
+          };
+          e2eAll = pkgs.writeShellApplication {
+            name = "e2e-all";
+            runtimeInputs = [
+              pkgs.bash
+              pkgs.bun
+              pkgs.coreutils
+              pkgs.git
+              pkgs.nix
+            ];
+            text = ''exec bash "$PWD/scripts/e2e.sh" all "$@"'';
+          };
         in
         {
           default = api;
@@ -355,9 +527,35 @@
             start
             checkLocal
             ledgerBootstrap
+            e2e
+            e2eBazanticCanary
+            e2eAll
             ;
           order-worker = orderWorker;
         }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+          let
+            speculos = speculosPackage pkgs;
+            securityKey = ledgerApp pkgs "security-key" ledger-security-key "ENABLE_RK_CONFIG_UI_SETTING=0";
+            ledgerSyncApp = ledgerApp pkgs "ledger-sync" ledger-sync "";
+            ethereumApp = ledgerApp pkgs "ethereum" ledger-ethereum "";
+          in
+          {
+            inherit speculos;
+            ledger-security-key = securityKey;
+            ledger-sync = ledgerSyncApp;
+            ledger-ethereum = ethereumApp;
+            ledger-e2e-assets = pkgs.runCommand "ledger-e2e-assets" { } ''
+              mkdir -p "$out/apps"
+              cp ${securityKey}/share/ledger-apps/security-key.elf "$out/apps/security-key.elf"
+              cp ${ledgerSyncApp}/share/ledger-apps/ledger-sync.elf "$out/apps/ledger-sync.elf"
+              cp ${ethereumApp}/share/ledger-apps/ethereum.elf "$out/apps/ethereum.elf"
+              cat > "$out/revisions.json" <<'EOF'
+              ${builtins.toJSON ledgerRevision}
+              EOF
+            '';
+          }
+        )
       );
 
       apps = eachSystem (
@@ -394,6 +592,18 @@
           ledger-bootstrap = {
             type = "app";
             program = "${packages.ledgerBootstrap}/bin/ledger-bootstrap";
+          };
+          e2e = {
+            type = "app";
+            program = "${packages.e2e}/bin/e2e";
+          };
+          e2e-bazantic-canary = {
+            type = "app";
+            program = "${packages.e2eBazanticCanary}/bin/e2e-bazantic-canary";
+          };
+          e2e-all = {
+            type = "app";
+            program = "${packages.e2eAll}/bin/e2e-all";
           };
         }
       );
@@ -434,6 +644,9 @@
               dev
               start
               ledgerBootstrap
+              self.packages.${system}.e2e
+              self.packages.${system}.e2eBazanticCanary
+              self.packages.${system}.e2eAll
               pkgs.bun
               pkgs.nodejs
               pkgs.yarn
@@ -446,6 +659,12 @@
               pkgs.process-compose
               pkgs.turbo
               pkgs.nixfmt
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              self.packages.${system}.speculos
+              self.packages.${system}.ledger-e2e-assets
+              pkgs.python3Packages.fido2
+              pkgs.qemu
             ];
             shellHook = ''
               aube install
@@ -455,6 +674,12 @@
               export SWAPVM_UPSTREAM=${swapvm}
               export X402_UPSTREAM=${x402}
               export PERMIT2_UPSTREAM=${permit2}
+              export AQUA_SPECULOS_SOURCE=${speculos-src}
+                ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  export AQUA_SPECULOS_BIN=${self.packages.${system}.speculos}/bin/speculos
+                  export AQUA_LEDGER_E2E_ASSETS=${self.packages.${system}.ledger-e2e-assets}
+                  export AQUA_LEDGER_SECURITY_KEY_SOURCE=${ledger-security-key}
+                ''}
               export AQUA_STATE_DIR="''${AQUA_STATE_DIR:-$PWD/.data}"
               export DATABASE_URL="''${DATABASE_URL:-postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend}"
               mkdir -p "$AQUA_STATE_DIR"

@@ -28,7 +28,13 @@ if (mode === "provision") {
     await run(["ring", "init"], null, true);
   }
   await mkdir(dirname(ciphertextPath), { recursive: true, mode: 0o700 });
-  const privateKey = randomSigningKey(); const address = signingKeyAddress(privateKey);
+  const e2ePrivateKey = Bun.env["AQUA_E2E_AGENT_PRIVATE_KEY"];
+  if (e2ePrivateKey !== undefined && Bun.env["AQUA_E2E"] !== "1") {
+    throw new Error("AQUA_E2E_AGENT_PRIVATE_KEY is restricted to AQUA_E2E=1");
+  }
+  const privateKey = e2ePrivateKey === undefined ? randomSigningKey() : hexSchema.parse(e2ePrivateKey);
+  if (privateKey.length !== 66) throw new Error("Agent private key must contain exactly 32 bytes");
+  const address = signingKeyAddress(privateKey);
   await run(["ring", "encrypt", "--key", "aqua-agent", "-o", ciphertextPath], privateKey);
   const metadata = { address, ciphertextPath, createdAt: new Date().toISOString() };
   await writeFile(metadataPath, JSON.stringify(metadata), { mode: 0o600 });

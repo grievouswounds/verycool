@@ -23,6 +23,9 @@
     "db:migrate": "bun scripts/migrate.ts",
     "test:integration": "bun test test/integration",
     "test:protocol": "bun test test/protocol",
+    "test:e2e": "e2e",
+    "test:e2e:bazantic": "e2e-bazantic-canary",
+    "test:e2e:all": "e2e-all",
     "type-coverage": "type-coverage --strict --at-least 100",
     "typecheck": "tsc --noEmit && type-coverage --strict --at-least 100"
   },
@@ -51,6 +54,7 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/bun": "1.4.1",
+    "@types/node": "26.4.1",
     "eslint": "10.10.0",
     "jiti": "^2.7.0",
     "turbo": "2.10.12",

@@ -10,8 +10,11 @@ let initialized = false;
 
 export const initializeCubane = (): void => {
   if (initialized) return;
-  Keccak256.set(Keccak256.fromNoble(nobleSha3));
-  Secp256k1.set(Secp256k1.fromNoble(nobleSecp256k1));
+  // Noble's private class identities differ across compatible transitive versions; the adapter API is runtime-compatible.
+  /* type-coverage:ignore-next-line -- audited adapter bridge across Noble versions with private nominal class identities. */
+  Keccak256.set(Keccak256.fromNoble(nobleSha3 as never)); // eslint-disable-line @typescript-eslint/no-unsafe-type-assertion -- audited adapter bridge.
+  /* type-coverage:ignore-next-line -- audited adapter bridge across Noble versions with private nominal class identities. */
+  Secp256k1.set(Secp256k1.fromNoble(nobleSecp256k1 as never)); // eslint-disable-line @typescript-eslint/no-unsafe-type-assertion -- audited adapter bridge.
   if (keccakHex(new Uint8Array()) !== "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470") {
     throw new Error("Cubane Keccak-256 known-answer test failed");
   }
