@@ -291,8 +291,8 @@ export class PooledRpcClient extends JsonRpcClient {
     return this.pooled.snapshot();
   }
 
-  public async rawRequest(method: string, params: readonly unknown[]): Promise<unknown> {
-    return this.pooled.request(method, params);
+  public async rawRequest(method: string, params: readonly unknown[], options?: RpcRequestOptions): Promise<unknown> {
+    return this.pooled.request(method, params, options);
   }
 }
 
@@ -327,7 +327,8 @@ export const serveRpcProxy = (client: PooledRpcClient): { readonly url: string; 
         return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32_600, message: "Invalid request" } }, { status: 400 });
       }
       try {
-        const result = await client.rawRequest(parsed.data.method, parsed.data.params ?? []);
+        const options = parsed.data.method === "eth_sendRawTransaction" ? { kind: "broadcast" as const } : undefined;
+        const result = await client.rawRequest(parsed.data.method, parsed.data.params ?? [], options);
         return Response.json({ jsonrpc: "2.0", id: parsed.data.id, result });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : "RPC failed";

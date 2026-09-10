@@ -50,7 +50,7 @@ export class HttpRpcTransport implements RpcTransport {
     try {
       response = await this.fetcher(this.url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "user-agent": "aqua-json-rpc/1" },
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
         signal: AbortSignal.timeout(this.timeoutMs),
       });

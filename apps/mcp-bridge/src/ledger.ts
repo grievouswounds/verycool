@@ -23,8 +23,11 @@ export const signLedgerMessage = async (expectedOwner: Address, message: string)
 const jsonable = (value: unknown): unknown => {
   if (typeof value === "bigint") return value.toString();
   if (value instanceof Uint8Array) return `0x${Buffer.from(value).toString("hex")}`;
-  if (Array.isArray(value)) return value.map(jsonable);
-  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jsonable(item)]));
+  if (Array.isArray(value)) return z.array(z.unknown()).parse(value).map(jsonable);
+  if (value !== null && typeof value === "object") {
+    const record = z.record(z.string(), z.unknown()).parse(value);
+    return Object.fromEntries(Object.entries(record).map(([key, item]: [string, unknown]) => [key, jsonable(item)]));
+  }
   return value;
 };
 const scalarHex = (item: unknown): string | undefined => {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { addressSchema, hashSchema, hexSchema } from "@aqua/core";
+import type { AuthenticationScope } from "@aqua/core";
 import type { RpcBlock, RpcLog } from "@aqua/core";
 import { IntentAuthorizationService, TradingService, asRequestedPair, mergePairBooks } from "../src/index.ts";
 import type { IndexedFill, IndexedOrder, ProtocolGateway, StoredIntent, TradingRepository } from "../src/index.ts";
@@ -117,7 +118,7 @@ describe("unified trading service", () => {
     const repository = new MemoryRepository();
     const protocol = new ProtocolStub();
     const service = new TradingService(repository, protocol, new IntentAuthorizationService(repository, new RpcStub(), { chainId: 1, controller: router, validitySeconds: 300 }), 1);
-    const actor = { address: maker, sessionId: "s", scopes: new Set(["trading:read", "trading:write"]) };
+    const actor = { address: maker, sessionId: "s", scopes: new Set<AuthenticationScope>(["trading:read", "trading:write"]) };
     const order = {
       kind: "limit" as const, pair: { baseToken: base, quoteToken: quote }, side: "sell" as const,
       size: { denomination: "base" as const, amount: "1" }, limitPrice: "9", timeInForce: { kind: "gtc" as const },
