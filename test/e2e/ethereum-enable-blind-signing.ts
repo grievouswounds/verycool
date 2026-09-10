@@ -1,10 +1,15 @@
+import { z } from "zod";
+
 const url = new URL(Bun.env["AQUA_SPECULOS_URL"] ?? "http://127.0.0.1:5000");
+const screenSchema = z.object({
+  events: z.array(z.object({ text: z.unknown().optional() }).loose()).optional(),
+}).loose();
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const currentScreen = async (): Promise<string> => {
-  const body = await (await fetch(new URL("/events?currentscreenonly=true", url))).json() as { readonly events?: readonly { readonly text?: unknown }[] };
-  const events = Array.isArray(body.events) ? body.events : [];
+  const body = screenSchema.parse(await (await fetch(new URL("/events?currentscreenonly=true", url))).json());
+  const events = body.events ?? [];
   return events.map((event) => String(event.text ?? "").trim()).filter((line) => line.length > 0).join("\n");
 };
 

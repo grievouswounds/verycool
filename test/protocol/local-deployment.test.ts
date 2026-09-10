@@ -18,6 +18,18 @@ describe("local deployment policy", () => {
     expect(keccakHex(new TextEncoder().encode("deployVault(address,address,address,address,address,bytes32)")).slice(0, 10)).toBe("0xf15d634f");
   });
 
+  test("public-chain deploy refuses the Anvil key and pins Sepolia plus vanity Aqua", async () => {
+    const source = await Bun.file("scripts/deploy-public-chain.ts").text();
+    expect(source).toContain("Refusing the public Anvil account-0 key on Ethereum Sepolia");
+    expect(source).toContain("11_155_111");
+    expect(source).toContain("0x1111113ccf1426a8e30e2bff5e005d929bf6a90a");
+    expect(source).not.toContain("anvil_setCode");
+    expect(source).not.toContain("anvil_setBalance");
+    expect(source).toContain("--legacy");
+    expect(source).not.toContain("AQUA_SEPOLIA_RPC_URL");
+    expect(source).not.toMatch(/https:\/\/(?:rpc\.|gateway\.|sepolia\.)/u);
+  });
+
   test("requires BoundedMatcher and permits both fixture pair directions", () => {
     const contract = (digit: string) => ({ address: addressSchema.parse(`0x${digit.repeat(40)}`), runtimeCodeHash: `0x${digit.repeat(64)}` });
     const input = {

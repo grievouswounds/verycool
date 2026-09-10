@@ -42,9 +42,18 @@ fi`);
 };
 
 const invoke = async (item: Awaited<ReturnType<typeof fixture>>, input = "password\npassword\n", environment: Record<string, string> = {}) => {
-  const child = Bun.spawn(["bash", "scripts/ledger-bootstrap.sh"], {
+  const child = Bun.spawn(["bash", "scripts/ledger-bootstrap.sh", "--prod"], {
     cwd: globalThis.process.cwd(), stdin: "pipe", stdout: "pipe", stderr: "pipe",
-    env: { ...Bun.env, AQUA_E2E: "0", ...environment, PATH: `${item.bin}:${Bun.env["PATH"] ?? ""}`, AQUA_STATE_DIR: item.state },
+    env: {
+      ...Bun.env,
+      AQUA_E2E: "0",
+      AQUA_LEDGER: "physical",
+      AQUA_LEDGER_TRANSPORT: "node-hid",
+      AQUA_WALLET_CLI: `${item.bin}/wallet-cli`,
+      ...environment,
+      PATH: `${item.bin}:${Bun.env["PATH"] ?? ""}`,
+      AQUA_STATE_DIR: item.state,
+    },
   });
   await child.stdin.write(input);
   await child.stdin.end();

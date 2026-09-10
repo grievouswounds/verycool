@@ -2,7 +2,7 @@ import { z } from "zod";
 import { describe, expect, test } from "bun:test";
 import { AppError, addressSchema, hexSchema, quantitySchema } from "@aqua/core";
 import { keccakHex, hexToBytes, initializeCubane } from "../src/index.ts";
-import { PooledRpcClient, PooledRpcTransport } from "../src/pool.ts";
+import { PooledRpcClient, PooledRpcTransport, serveRpcProxy } from "../src/pool.ts";
 import type { RpcEndpoint } from "../src/endpoints.ts";
 import { classifyJsonRpc } from "../src/normalize.ts";
 
@@ -191,6 +191,46 @@ describe("pooled RPC transport", () => {
     expect(sendUrls).toEqual(["http://a.test/"]);
     await rpc.sendRawTransaction(hexSchema.parse("0x02"));
     expect(sendUrls.length).toBeGreaterThan(1);
+  });
+
+  test("serveRpcProxy fans out broadcasts and singles reads", async () => {
+    initializeCubane();
+    const sendUrls: string[] = [];
+    const callUrls: string[] = [];
+    const rpc = clientOf(["http://a.test/", "http://b.test/", "http://c.test/"], (url, body) => {
+      if (body.method === "eth_chainId") return success(body.id, chainIdHex);
+      if (body.method === "eth_sendRawTransaction") {
+        sendUrls.push(url);
+        return success(body.id, `0x${"ab".repeat(32)}`);
+      }
+      if (body.method === "eth_call") {
+        callUrls.push(url);
+        return success(body.id, "0x");
+      }
+      return success(body.id, "0x1");
+    });
+    const proxy = serveRpcProxy(rpc);
+    try {
+      const broadcast = await fetch(proxy.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_sendRawTransaction", params: ["0x02"] }),
+      });
+      expect(broadcast.ok).toBe(true);
+      expect(sendUrls.length).toBe(3);
+      const call = await fetch(proxy.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 2, method: "eth_call",
+          params: [{ to: `0x${"11".repeat(20)}`, data: "0x" }, "latest"],
+        }),
+      });
+      expect(call.ok).toBe(true);
+      expect(callUrls).toHaveLength(1);
+    } finally {
+      proxy.stop();
+    }
   });
 
   test("normalizes nested revert data", () => {

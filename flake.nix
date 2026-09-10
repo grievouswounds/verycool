@@ -625,7 +625,7 @@
               pkgs.git
               pkgs.nix
             ];
-            text = ''exec bash "$PWD/scripts/e2e.sh" deterministic "$@"'';
+            text = ''exec bash "$PWD/scripts/e2e.sh" --dev deterministic "$@"'';
           };
           e2eBazanticCanary = pkgs.writeShellApplication {
             name = "e2e-bazantic-canary";

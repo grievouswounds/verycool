@@ -48,10 +48,13 @@ export const parseMcpCheckMode = (value: string): McpCheckMode => {
   return fail(`mode must be ${MCP_CHECK_MODES.join(", ")}, not ${value}`);
 };
 
-export const missingRequiredAquaTools = (names: readonly string[]): readonly AquaMcpToolName[] =>
-  (Object.keys(requiredAquaTools) as AquaMcpToolName[]).filter(
-    (local) => !requiredAquaTools[local].some((alias) => names.includes(alias)),
-  );
+export const missingRequiredAquaTools = (names: readonly string[]): readonly AquaMcpToolName[] => {
+  const locals: readonly AquaMcpToolName[] = [
+    "request_trade", "post_trade", "get_trades", "cancel_trade",
+    "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades",
+  ];
+  return locals.filter((local) => !requiredAquaTools[local].some((alias) => names.includes(alias)));
+};
 
 export const oauthCacheIsFresh = async (path: string, now = Date.now()): Promise<boolean> => {
   try {
@@ -110,9 +113,9 @@ const assertToolCatalog = (body: unknown, label: string): void => {
 const checkGateway = async (mcpjam: string, root: string): Promise<void> => {
   const slug = await resolveSlug(root);
   const gateway = await new BazanticCatalogClient({}).getGateway(slug);
-  if (gateway === null) fail(`Bazantic gateway ${slug} was not found in catalog. Activate the listing, then retry.`);
-  if (gateway.mcpUrl === null) fail(`Bazantic gateway ${slug} does not advertise an MCP endpoint`);
+  if (gateway === null) return fail(`Bazantic gateway ${slug} was not found in catalog. Activate the listing, then retry.`);
   const mcpUrl = gateway.mcpUrl;
+  if (mcpUrl === null) return fail(`Bazantic gateway ${slug} does not advertise an MCP endpoint`);
   assertDoctorReady(await runJson(mcpjam, ["server", "doctor", "--url", mcpUrl, "--quiet", "--format", "json"]), "gateway");
   assertToolCatalog(await runJson(mcpjam, ["tools", "list", "--url", mcpUrl, "--quiet", "--format", "json"]), "gateway");
   await runJson(mcpjam, ["protocol", "conformance", "--url", mcpUrl, "--reporter", "json-summary"]);

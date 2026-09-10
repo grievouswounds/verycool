@@ -5,7 +5,7 @@ import type { ArmedTriggerLeg, TradeTriggerSource } from "@aqua/orderbook";
 import { z } from "zod";
 
 const jsonValue = (value: unknown): unknown => (typeof value === "string" ? parseStrictJson(value) : value);
-const asRows = <T>(value: T | readonly T[]): readonly T[] => Array.isArray(value) ? value : [value];
+const asRows = <T>(value: T | T[]): readonly T[] => Array.isArray(value) ? value : [value];
 
 const decimalIntegerSchema = z.string().regex(/^(?:0|[1-9][0-9]*)$/u);
 const trailSchema = z.discriminatedUnion("unit", [
