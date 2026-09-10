@@ -156,6 +156,30 @@ Arbitrary Aqua bytecode is out of scope: SwapVM instruction order is security-cr
 
 `aube run deploy` / `nix develop -c deploy` bundles API + facilitator to Vercel and can register a **draft** Bazantic gateway. Needs `baz login`, production manifest, Neon `DATABASE_URL`, env signer. Hardware AMR routes (`/v1/trades`, previews, delegations) stay on the **local MCP bridge**, not the hosted `{endpoint}/mcp` tool-caller.
 
+## Deployments (Ethereum Sepolia)
+
+Live demo on chain **11155111**. Explorer links go to Sepolia Etherscan.
+
+We **reused** the vanity Aqua registry, canonical Permit2, x402 exact proxy, CREATE2 deployer, and Sepolia WETH. We **deployed** both SwapVM routers (the vanity router address was empty), fixture tokens, intent controller, vault factory, and bounded matcher. Intent `operator` is the Speculos keyring keeper from this machine — a physical Ledger needs a new keyring and a new operator deploy.
+
+| What | Address | Notes |
+| --- | --- | --- |
+| Aqua registry | [`0x1111113ccf1426a8e30e2bff5e005d929bf6a90a`](https://sepolia.etherscan.io/address/0x1111113ccf1426a8e30e2bff5e005d929bf6a90a) | Existing 1inch vanity Aqua; routers bind `AQUA()` here |
+| AquaSwapVMRouter | [`0x07b3475bbdb0389c21640b1334eff6a41970136b`](https://sepolia.etherscan.io/address/0x07b3475bbdb0389c21640b1334eff6a41970136b) | Market / SwapVM swap router we deployed |
+| LimitSwapVMRouter | [`0xed9275955c0085a322c3b26735beb25cc21171f9`](https://sepolia.etherscan.io/address/0xed9275955c0085a322c3b26735beb25cc21171f9) | Limit opcode programs; not on the vanity address |
+| WETH | [`0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14`](https://sepolia.etherscan.io/address/0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14) | Canonical Sepolia wrapped ETH |
+| Permit2 | [`0x000000000022D473030F116dDEE9F6B43aC78BA3`](https://sepolia.etherscan.io/address/0x000000000022D473030F116dDEE9F6B43aC78BA3) | Canonical Uniswap Permit2 |
+| x402 exact Permit2 proxy | [`0x402085c248EeA27D92E8b30b2C58ed07f9E20001`](https://sepolia.etherscan.io/address/0x402085c248EeA27D92E8b30b2C58ed07f9E20001) | Canonical x402 exact proxy (already on Sepolia) |
+| AquaIntentController | [`0xbae91f21b2bf19013af494b107d9e0f8731c707a`](https://sepolia.etherscan.io/address/0xbae91f21b2bf19013af494b107d9e0f8731c707a) | EIP-712 nonces and stop/OCO triggers; operator = keeper |
+| AquaOrderVaultFactory | [`0x90da9256755b496609dc0162a8cef413f8742d09`](https://sepolia.etherscan.io/address/0x90da9256755b496609dc0162a8cef413f8742d09) | Deploys per-order vaults |
+| BoundedMatcher | [`0x1062b3da82e21b55be9d7658ed2557b9021ddc52`](https://sepolia.etherscan.io/address/0x1062b3da82e21b55be9d7658ed2557b9021ddc52) | Keeper may only `swap` / `activate` / `observe` / `execute` here |
+| Fixture aUSD | [`0x019799b067422517212ce754f96d4faa6cc6a090`](https://sepolia.etherscan.io/address/0x019799b067422517212ce754f96d4faa6cc6a090) | Demo 6-decimal book token |
+| Fixture aETH | [`0x0bB3844E65962A303BC4caBdD4B742a324f2f570`](https://sepolia.etherscan.io/address/0x0bB3844E65962A303BC4caBdD4B742a324f2f570) | Demo 18-decimal book token |
+| Deployer | [`0x2337D66f63Ed5e6eFF25286f8034AcEFb8B5faC9`](https://sepolia.etherscan.io/address/0x2337D66f63Ed5e6eFF25286f8034AcEFb8B5faC9) | Funded EOA that broadcast the create txs |
+| Agent (keyring) | [`0x5d6d277095483172fbf9313bff1b6a37f7e0d161`](https://sepolia.etherscan.io/address/0x5d6d277095483172fbf9313bff1b6a37f7e0d161) | MCP / LKRP agent; seeded with ETH + fixtures |
+| Facilitator (keyring) | [`0x4b8011ee42d42ca5b9b5fea21072b03cf3913c1b`](https://sepolia.etherscan.io/address/0x4b8011ee42d42ca5b9b5fea21072b03cf3913c1b) | x402 facilitator signer |
+| Keeper (keyring) | [`0xf7d88489a8df2be554eab383feeaf730bc525806`](https://sepolia.etherscan.io/address/0xf7d88489a8df2be554eab383feeaf730bc525806) | Intent operator and matcher operator |
+
 ## Next steps
 
 - Physical-Ledger demo on Sepolia with the owner's device (new keyring → new operator contracts).
