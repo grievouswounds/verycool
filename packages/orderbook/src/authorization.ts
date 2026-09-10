@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { AppError, hashSchema, hexSchema, parseStrictJson } from "@aqua/core";
 import type { Address, Hash, Hex, RpcPort, TradingRequest } from "@aqua/core";
-import { encodeIsValidSignature, hashTypedAuthorization, keccakHex, recoverTypedAuthorizationAddress } from "@aqua/evm";
+import { encodeIsValidSignature, hasContractCode, hashTypedAuthorization, keccakHex, recoverTypedAuthorizationAddress } from "@aqua/evm";
 import type { AuthorizationRequirement, StoredIntent, TradingRepository } from "./types.ts";
 
 export interface AuthorizationConfiguration {
@@ -93,7 +93,7 @@ export class IntentAuthorizationService {
       commandHash: intent.commandHash, nonce: intent.nonce,
       validBefore: BigInt(Math.floor(intent.validBefore.getTime() / 1_000)),
     };
-    if ((await this.rpc.getCode(intent.maker)).length > 2) {
+    if (hasContractCode(await this.rpc.getCode(intent.maker))) {
       const digest = hashTypedAuthorization(typedData);
       const result = await this.rpc.call({ to: intent.maker, data: encodeIsValidSignature(digest, signature) });
       if (!result.startsWith("0x1626ba7e")) throw new AppError(401, "urn:aqua:error:authorization-signature", "EIP-1271 authorization was rejected");

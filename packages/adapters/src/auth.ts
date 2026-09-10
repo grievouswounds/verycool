@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { SQL } from "bun";
 import { AppError, AUTHENTICATION_SCOPES } from "@aqua/core";
 import type { Address, AuthenticatedPrincipal, Hex, RpcPort } from "@aqua/core";
-import { encodeIsValidSignature, keccakHex, recoverPersonalAddress } from "@aqua/evm";
+import { encodeIsValidSignature, hasContractCode, keccakHex, recoverPersonalAddress } from "@aqua/evm";
 import { PasetoAccessTokenIssuer, PasetoAccessTokenVerifier } from "./paseto.ts";
 import type { AccessTokenGrant } from "./paseto.ts";
 
@@ -30,7 +30,27 @@ export class AuthService {
   public static async create(config: AuthConfiguration, store: AuthStore, rpc: RpcPort): Promise<AuthService> { const tokenConfiguration = { issuer: config.issuer, resource: config.resource, chainId: config.chainId, publicKeysPaserk: config.publicKeysPaserk }; return new AuthService(config, store, new PasetoAccessTokenIssuer({ ...tokenConfiguration, secretKeyPaserk: config.secretKeyPaserk, ttlSeconds: config.accessTtlSeconds }), new PasetoAccessTokenVerifier(tokenConfiguration), rpc); }
   public static withIssuer(config: AuthConfiguration, store: AuthStore, rpc: RpcPort, issuer: AccessTokenIssuer): AuthService { const tokenConfiguration={issuer:config.issuer,resource:config.resource,chainId:config.chainId,publicKeysPaserk:config.publicKeysPaserk}; return new AuthService(config,store,issuer,new PasetoAccessTokenVerifier(tokenConfiguration),rpc); }
   public async challenge(address: Address): Promise<{ readonly challengeId: string; readonly message: string; readonly expiresAt: string }> { const now = new Date(); const expiresAt = new Date(now.getTime() + 300_000); const challengeId = randomUUID(); const nonce = randomBytes(12).toString("base64url"); const message = `${this.config.domain} wants you to sign in with your Ethereum account:\n${address}\n\nSign in to Aqua Backend\n\nURI: ${this.config.uri}\nVersion: 1\nChain ID: ${String(this.config.chainId)}\nNonce: ${nonce}\nIssued At: ${now.toISOString()}\nExpiration Time: ${expiresAt.toISOString()}\nRequest ID: ${challengeId}`; await this.store.saveChallenge({ _id: challengeId, address, message, expiresAt }); return { challengeId, message, expiresAt: expiresAt.toISOString() }; }
-  public async session(challengeId: string, message: string, signature: Hex): Promise<SessionResult> { const challenge = await this.store.consumeChallenge(challengeId, new Date()); if (challenge?.message !== message) throw new AppError(409, "urn:aqua:error:challenge", "Challenge is invalid, expired, or already used"); const code = await this.rpc.getCode(challenge.address); if (code.length > 2) { const bytes = new TextEncoder().encode(message); const prefix = new TextEncoder().encode(`\u0019Ethereum Signed Message:\n${String(bytes.length)}`); const result = await this.rpc.call({ to: challenge.address, data: encodeIsValidSignature(keccakHex(Uint8Array.from([...prefix, ...bytes])), signature) }); if (!result.toLowerCase().startsWith("0x1626ba7e")) throw new AppError(401, "urn:aqua:error:signature", "EIP-1271 signature was rejected"); } else { let recovered: Address; try { recovered = recoverPersonalAddress(message, signature); } catch { throw new AppError(401, "urn:aqua:error:signature", "Invalid SIWE signature"); } if (recovered !== challenge.address) throw new AppError(401, "urn:aqua:error:signature", "Signature does not match the requested account"); } return this.issue(challenge.address, randomUUID()); }
+  public async session(challengeId: string, message: string, signature: Hex): Promise<SessionResult> {
+    const challenge = await this.store.consumeChallenge(challengeId, new Date());
+    if (challenge?.message !== message) throw new AppError(409, "urn:aqua:error:challenge", "Challenge is invalid, expired, or already used");
+    try {
+      if (recoverPersonalAddress(message, signature) === challenge.address) {
+        return this.issue(challenge.address, randomUUID());
+      }
+    } catch { /* contract wallets are verified with EIP-1271 below */ }
+    const code = await this.rpc.getCode(challenge.address);
+    if (!hasContractCode(code)) throw new AppError(401, "urn:aqua:error:signature", "Signature does not match the requested account");
+    const bytes = new TextEncoder().encode(message);
+    const prefix = new TextEncoder().encode(`\u0019Ethereum Signed Message:\n${String(bytes.length)}`);
+    let result: string;
+    try {
+      result = await this.rpc.call({ to: challenge.address, data: encodeIsValidSignature(keccakHex(Uint8Array.from([...prefix, ...bytes])), signature) });
+    } catch {
+      throw new AppError(401, "urn:aqua:error:signature", "EIP-1271 signature was rejected");
+    }
+    if (!result.toLowerCase().startsWith("0x1626ba7e")) throw new AppError(401, "urn:aqua:error:signature", "EIP-1271 signature was rejected");
+    return this.issue(challenge.address, randomUUID());
+  }
   public async refresh(token: string): Promise<SessionResult> { const stored = await this.store.consumeRefresh(tokenHash(token), new Date()); if (stored === null) throw new AppError(401, "urn:aqua:error:refresh", "Refresh token is invalid, expired, or already used"); return this.issue(stored.address, stored.sessionId); }
   public issueHardware(address: Address, clientId: string, scopes: readonly (typeof AUTHENTICATION_SCOPES)[number][]): Promise<SessionResult> { return this.issue(address, randomUUID(), ["fido2","hwk"], clientId, scopes); }
   private async issue(address: Address, sessionId: string, amr:readonly ("siwe"|"fido2"|"hwk")[]=["siwe"], clientId="aqua-rest", scopes:readonly (typeof AUTHENTICATION_SCOPES)[number][]=AUTHENTICATION_SCOPES): Promise<SessionResult> { const refreshToken = randomBytes(32).toString("base64url"); await this.store.saveRefresh({ _id: tokenHash(refreshToken), address, sessionId, expiresAt: new Date(Date.now() + this.config.refreshTtlSeconds * 1_000) }); return { accessToken: await this.tokenIssuer.issue({ address, sessionId, scopes, amr, clientId }), refreshToken, expiresIn: this.config.accessTtlSeconds }; }

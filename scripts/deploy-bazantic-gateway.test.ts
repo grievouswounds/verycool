@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ANVIL_ACCOUNT_ZERO_KEY, GATEWAY_NAME, parseVercelDeploymentUrl, rewriteManifestPublicOrigin } from "./deploy-bazantic-gateway.ts";
+import { ANVIL_ACCOUNT_ZERO_KEY, GATEWAY_NAME, HOSTED_VERCEL_CONFIG, parseVercelDeploymentUrl, rewriteManifestPublicOrigin } from "./deploy-bazantic-gateway.ts";
 import { runtimeManifestSchema } from "@aqua/core";
 import { signingKeyAddress } from "@aqua/evm";
 
@@ -15,6 +15,19 @@ describe("Bazantic gateway deploy helpers", () => {
     ].join("\n");
     expect(parseVercelDeploymentUrl(log)).toBe("https://aqua-hosted-xyz.vercel.app");
     expect(parseVercelDeploymentUrl("no url here")).toBeUndefined();
+  });
+
+  test("prefers the public production alias over a SSO-protected deployment URL", () => {
+    const log = [
+      "Production      https://vercel-k3kwscp8e-solvasolva.vercel.app",
+      "▲ Aliased         https://vercel-henna-gamma-46.vercel.app",
+    ].join("\n");
+    expect(parseVercelDeploymentUrl(log)).toBe("https://vercel-henna-gamma-46.vercel.app");
+  });
+
+  test("deploys the hosted API with the Bun framework preset instead of a static public directory", () => {
+    expect(HOSTED_VERCEL_CONFIG.framework).toBe("bun");
+    expect(HOSTED_VERCEL_CONFIG.bunVersion).toBe("1.x");
   });
 
   test("pins the Anvil account-zero key to the well-known address", () => {

@@ -21,7 +21,8 @@ describe("local deployment policy", () => {
   test("public-chain deploy refuses the Anvil key and pins Sepolia plus vanity Aqua", async () => {
     const source = await Bun.file("scripts/deploy-public-chain.ts").text();
     expect(source).toContain("Refusing the public Anvil account-0 key on Ethereum Sepolia");
-    expect(source).toContain("11_155_111");
+    expect(source).toContain("ETHEREUM_SEPOLIA_CHAIN_ID");
+    expect(source).toContain("const PUBLIC_CHAIN_ID = ETHEREUM_SEPOLIA_CHAIN_ID");
     expect(source).toContain("0x1111113ccf1426a8e30e2bff5e005d929bf6a90a");
     expect(source).not.toContain("anvil_setCode");
     expect(source).not.toContain("anvil_setBalance");

@@ -14,6 +14,11 @@ export type { RpcPoolSnapshot };
 
 const QUORUM = 3;
 const BROADCAST_FANOUT = 3;
+const HEDGE_WAVE = 3;
+const HEDGEABLE = new Set([
+  "eth_chainId", "eth_gasPrice", "eth_blockNumber", "eth_getCode",
+  "eth_getTransactionCount", "eth_getBalance", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas",
+]);
 
 export interface PooledRpcOptions {
   readonly timeoutMs: number;
@@ -74,6 +79,9 @@ export class PooledRpcTransport implements RpcTransport {
     }
     const ranked = this.rank(options, method);
     if (ranked.length === 0) throw upstreamError("No healthy RPC endpoints");
+    if (HEDGEABLE.has(method) && options?.kind !== "broadcast") {
+      return this.invokeHedged(ranked, method, params, options);
+    }
     let last: ClassifiedRpcError | undefined;
     for (const candidate of ranked) {
       try {
@@ -119,16 +127,23 @@ export class PooledRpcTransport implements RpcTransport {
     if (needed === 0) throw upstreamError("No healthy RPC endpoints");
     const heights: bigint[] = [];
     let last: ClassifiedRpcError | undefined;
-    for (const candidate of ranked) {
-      try {
-        const result = await this.invoke(candidate, "eth_blockNumber", []);
-        const height = parseHeight("eth_blockNumber", result);
-        if (height === undefined) continue;
-        heights.push(height);
-        if (heights.length >= needed) break;
-      } catch (error: unknown) {
-        if (!(error instanceof ClassifiedRpcError)) throw error;
-        last = error;
+    for (let offset = 0; offset < ranked.length && heights.length < needed; offset += HEDGE_WAVE) {
+      const wave = ranked.slice(offset, offset + HEDGE_WAVE);
+      const settled = await Promise.all(wave.map(async (candidate) => {
+        try {
+          return { ok: true as const, result: await this.invoke(candidate, "eth_blockNumber", []) };
+        } catch (error: unknown) {
+          if (!(error instanceof ClassifiedRpcError)) throw error;
+          return { ok: false as const, error };
+        }
+      }));
+      for (const item of settled) {
+        if (!item.ok) {
+          last = item.error;
+          continue;
+        }
+        const height = parseHeight("eth_blockNumber", item.result);
+        if (height !== undefined) heights.push(height);
       }
     }
     if (heights.length === 0) throw last ?? classifyTransport(new Error("RPC pool exhausted"));
@@ -183,6 +198,53 @@ export class PooledRpcTransport implements RpcTransport {
     return eligible.map((item) => item.candidate);
   }
 
+  private async invokeHedged(
+    ranked: readonly RankedEndpoint[],
+    method: string,
+    params: readonly unknown[],
+    options?: RpcRequestOptions,
+  ): Promise<unknown> {
+    let last: ClassifiedRpcError | undefined;
+    for (let offset = 0; offset < ranked.length; offset += HEDGE_WAVE) {
+      const wave = ranked.slice(offset, offset + HEDGE_WAVE);
+      const outcome = await new Promise<{ ok: true; value: unknown } | { ok: false; terminal: boolean }>((resolve, reject) => {
+        let remaining = wave.length;
+        let settled = false;
+        for (const candidate of wave) {
+          void this.invoke(candidate, method, params, options).then((value) => {
+            if (settled) return;
+            settled = true;
+            resolve({ ok: true, value });
+          }, (error: unknown) => {
+            if (!(error instanceof ClassifiedRpcError)) {
+              if (!settled) {
+                settled = true;
+                reject(error);
+              }
+              return;
+            }
+            last = error;
+            if (isTerminalClass(error.class) || error.class === "alreadyKnown") {
+              if (!settled) {
+                settled = true;
+                resolve({ ok: false, terminal: true });
+              }
+              return;
+            }
+            remaining -= 1;
+            if (remaining === 0 && !settled) {
+              settled = true;
+              resolve({ ok: false, terminal: false });
+            }
+          });
+        }
+      });
+      if (outcome.ok) return outcome.value;
+      if (outcome.terminal) throw last ?? classifyTransport(new Error("RPC pool exhausted"));
+    }
+    throw last ?? classifyTransport(new Error("RPC pool exhausted"));
+  }
+
   private async ensureAdmitted(candidate: RankedEndpoint): Promise<boolean> {
     const url = candidate.endpoint.url;
     const existing = this.admissions.get(url);
@@ -202,7 +264,9 @@ export class PooledRpcTransport implements RpcTransport {
       }
     })();
     this.admissions.set(url, probe);
-    return probe;
+    const admitted = await probe;
+    if (!admitted) this.admissions.delete(url);
+    return admitted;
   }
 
   private async invoke(

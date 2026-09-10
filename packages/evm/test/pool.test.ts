@@ -4,6 +4,7 @@ import { AppError, addressSchema, hexSchema, quantitySchema } from "@aqua/core";
 import { keccakHex, hexToBytes, initializeCubane } from "../src/index.ts";
 import { PooledRpcClient, PooledRpcTransport, serveRpcProxy } from "../src/pool.ts";
 import type { RpcEndpoint } from "../src/endpoints.ts";
+import { ETHEREUM_SEPOLIA_CHAIN_ID, resolvePoolEndpoints } from "../src/endpoints.ts";
 import { classifyJsonRpc } from "../src/normalize.ts";
 
 const SEPOLIA = 11_155_111;
@@ -238,5 +239,34 @@ describe("pooled RPC transport", () => {
     expect(error.class).toBe("executionReverted");
     expect(error.revertData).toBe("0x08c379a0");
     expect(error.retryable).toBe(false);
+  });
+
+  test("hedges a hung primary endpoint instead of waiting for its admission timeout", async () => {
+    const rpc = new PooledRpcClient(new PooledRpcTransport(SEPOLIA, endpoints("http://slow.test/", "http://fast.test/"), {
+      timeoutMs: 5_000,
+      random: () => 0,
+      fetcher: async (input, init) => {
+        const url = requestUrl(input);
+        const body = rpcBodySchema.parse(JSON.parse(requestBody(init)));
+        if (url.includes("slow")) {
+          await new Promise((_, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          });
+        }
+        if (body.method === "eth_chainId") return success(body.id, chainIdHex);
+        return success(body.id, "0x5");
+      },
+    }));
+    expect(await rpc.gasPrice()).toBe(5n);
+  });
+
+  test("keeps the manifest RPC at the front of a registered chain pool without duplicating it", () => {
+    const extra = "https://rpc.example.invalid/sepolia";
+    const pooled = resolvePoolEndpoints(ETHEREUM_SEPOLIA_CHAIN_ID, extra);
+    expect(pooled[0]).toEqual({ name: "manifest", tier: 0, url: extra });
+    const publicnode = "https://ethereum-sepolia-rpc.publicnode.com";
+    const existing = resolvePoolEndpoints(ETHEREUM_SEPOLIA_CHAIN_ID, publicnode);
+    expect(existing[0]?.url).toBe(publicnode);
+    expect(existing.filter((endpoint) => endpoint.url === publicnode)).toHaveLength(1);
   });
 });

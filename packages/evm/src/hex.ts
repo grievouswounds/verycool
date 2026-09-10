@@ -32,5 +32,9 @@ export const quantityToHex = (value: bigint): Quantity => {
   return zQuantity(value);
 };
 export const hexToQuantity = (value: string): bigint => BigInt(value);
+export const hasContractCode = (code: Hex): boolean => {
+  const bytes = hexToBytes(code);
+  return bytes.length > 0 && bytes.some((byte) => byte !== 0);
+};
 
 const zQuantity = (value: bigint): Quantity => quantitySchema.parse(`0x${value.toString(16)}`);

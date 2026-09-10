@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { addressSchema, hashSchema, hexSchema } from "@aqua/core";
-import type { Address, RpcBlock, RpcLog } from "@aqua/core";
+import type { Address, Hex, RpcBlock, RpcLog } from "@aqua/core";
+import { initializeCubane, signPersonalMessage, signingKeyAddress } from "@aqua/evm";
 import { generateKeys } from "paseto-ts/v4";
 import { AuthService } from "../src/auth.ts";
 import type { AuthStore } from "../src/auth.ts";
@@ -83,5 +84,26 @@ describe("PASETO-backed SIWE sessions", () => {
     try { await auth.refresh(session.refreshToken); }
     catch { rejected = true; }
     expect(rejected).toBeTrue();
+  });
+
+  test("verifies an EOA SIWE signature without eth_getCode", async () => {
+    initializeCubane();
+    const key = hexSchema.parse(`0x${"0".repeat(63)}1`);
+    const wallet = signingKeyAddress(key);
+    class EoaRpc extends ContractWalletRpc {
+      public override async getCode(): Promise<Hex> { throw new Error("getCode must not run for EOAs"); }
+      public override async call(): Promise<Hex> { throw new Error("eth_call must not run for EOAs"); }
+    }
+    const pair = generateKeys("public");
+    const store = new MemoryAuthStore();
+    const auth = await AuthService.create({
+      domain: "localhost", uri: "http://localhost:3000", chainId: 1,
+      issuer: "https://auth.example.com", resource: "https://api.example.com/mcp",
+      secretKeyPaserk: pair.secretKey, publicKeysPaserk: [pair.publicKey],
+      accessTtlSeconds: 900, refreshTtlSeconds: 3_600,
+    }, store, new EoaRpc());
+    const challenge = await auth.challenge(wallet);
+    const session = await auth.session(challenge.challengeId, challenge.message, signPersonalMessage(key, challenge.message));
+    expect((await auth.authenticate(session.accessToken)).address).toBe(wallet);
   });
 });

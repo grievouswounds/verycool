@@ -31,7 +31,6 @@ const addressesPath = `${stateDir}/deployment-addresses.production.json`;
 const manifestPath = `${stateDir}/runtime-manifest.production.json`;
 const partialPath = `${stateDir}/deployments.partial.json`;
 const PUBLIC_CHAIN_ID = ETHEREUM_SEPOLIA_CHAIN_ID;
-if (PUBLIC_CHAIN_ID !== 11_155_111) throw new Error("Public deployment is restricted to Ethereum Sepolia");
 const ANVIL_ACCOUNT_ZERO_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const agentKey = hexSchema.parse(env("AQUA_AGENT_KEY"));
 const facilitatorKey = hexSchema.parse(env("AQUA_FACILITATOR_KEY"));
@@ -234,9 +233,15 @@ const assertDeploymentBindings = async (
   for (const router of [contracts.aquaSwapRouter.address, contracts.limitSwapRouter.address]) {
     if (!sameAddress(await castCall(router, "AQUA()(address)"), contracts.aqua.address)) throw new Error(`Router ${router} has the wrong Aqua binding`);
   }
-  if (!sameAddress(await castCall(contracts.intentController.address, "operator()(address)"), identity.keeper)) throw new Error("Intent controller operator does not match broker keeper");
+  const onChainControllerOperator = await castCall(contracts.intentController.address, "operator()(address)");
+  if (!sameAddress(onChainControllerOperator, identity.keeper)) {
+    throw new Error(`Intent controller operator ${onChainControllerOperator} does not match AQUA_KEEPER_KEY address ${identity.keeper}. Operator is immutable: put the private key for ${onChainControllerOperator} in AQUA_KEEPER_KEY (bun run identities).`);
+  }
   if (!sameAddress(await castCall(contracts.intentController.address, "matcher()(address)"), contracts.boundedMatcher.address)) throw new Error("Intent controller matcher is not bound to the bounded matcher");
-  if (!sameAddress(await castCall(contracts.boundedMatcher.address, "operator()(address)"), identity.keeper)) throw new Error("Bounded matcher operator does not match broker keeper");
+  const onChainMatcherOperator = await castCall(contracts.boundedMatcher.address, "operator()(address)");
+  if (!sameAddress(onChainMatcherOperator, identity.keeper)) {
+    throw new Error(`Bounded matcher operator ${onChainMatcherOperator} does not match AQUA_KEEPER_KEY address ${identity.keeper}. Operator is immutable: put the private key for ${onChainMatcherOperator} in AQUA_KEEPER_KEY.`);
+  }
   for (const router of [contracts.aquaSwapRouter.address, contracts.limitSwapRouter.address]) {
     if (await castCall(contracts.boundedMatcher.address, "allowed(address,bytes4)(bool)", [router, SWAP_SELECTOR]) !== "true") throw new Error(`Bounded matcher does not allow swap on ${router}`);
   }

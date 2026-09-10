@@ -1,16 +1,17 @@
 import { z } from "zod";
 import { addressSchema, hashSchema, hexSchema, quantitySchema, upstreamError } from "@aqua/core";
 import type { Address, Hash, Hex, RpcBlock, RpcCall, RpcLog, RpcLogFilter, RpcPort, RpcReceipt, RpcStateOverrides } from "@aqua/core";
-import { selector } from "./hex.ts";
+import { hasContractCode, hexToQuantity, quantityToHex, selector } from "./hex.ts";
 import { decodeString, decodeUint256 } from "./abi.ts";
-import { hexToQuantity, quantityToHex } from "./hex.ts";
 import { classifyHttp, classifyJsonRpc, classifyTransport, ClassifiedRpcError } from "./normalize.ts";
 
-const rpcSuccessSchema = z.object({ jsonrpc: z.literal("2.0"), id: z.number(), result: z.unknown() }).strict();
+const rpcIdSchema = z.union([z.number(), z.string()]);
+const rpcSuccessSchema = z.object({ jsonrpc: z.literal("2.0"), id: rpcIdSchema, result: z.unknown() }).strict();
 const rpcFailureSchema = z.object({
-  jsonrpc: z.literal("2.0"), id: z.number(),
+  jsonrpc: z.literal("2.0"), id: rpcIdSchema,
   error: z.object({ code: z.number().int(), message: z.string(), data: z.unknown().optional() }).strict(),
 }).strict();
+const echoedRpcId = (id: number | string): number => typeof id === "number" ? id : Number(id);
 const rawBlockSchema = z.object({ number: quantitySchema, hash: hashSchema, timestamp: quantitySchema }).loose();
 const rawLogSchema = z.object({
   address: addressSchema, blockNumber: quantitySchema, blockHash: hashSchema,
@@ -46,16 +47,21 @@ export class HttpRpcTransport implements RpcTransport {
 
   public async request(method: string, params: readonly unknown[]): Promise<unknown> {
     const id = ++this.requestId;
+    const timeoutMs = method === "eth_chainId" ? Math.min(2_000, this.timeoutMs) : this.timeoutMs;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
-      response = await this.fetcher(this.url, {
+      response = await this.fetcher(this.url.href, {
         method: "POST",
-        headers: { "content-type": "application/json", "user-agent": "aqua-json-rpc/1" },
+        headers: { "content-type": "application/json", accept: "application/json", "user-agent": "Aqua/1.0" },
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: controller.signal,
       });
     } catch (cause: unknown) {
       throw classifyTransport(cause);
+    } finally {
+      clearTimeout(timer);
     }
     if (!response.ok) {
       let bodyMessage: string | undefined;
@@ -84,7 +90,7 @@ export class HttpRpcTransport implements RpcTransport {
       throw classifyJsonRpc(method, params, failed.data.error.code, failed.data.error.message, failed.data.error.data);
     }
     const parsed = rpcSuccessSchema.safeParse(body);
-    if (!parsed.success || parsed.data.id !== id) throw classifyTransport(new Error("Malformed or mismatched RPC response"));
+    if (!parsed.success || echoedRpcId(parsed.data.id) !== id) throw classifyTransport(new Error("Malformed or mismatched RPC response"));
     return parsed.data.result;
   }
 }
@@ -120,7 +126,8 @@ export class JsonRpcClient implements RpcPort {
   }
 
   public async getCode(address: Address): Promise<Hex> {
-    return hexSchema.parse(await this.request("eth_getCode", [address, "latest"]));
+    const code = hexSchema.parse(await this.request("eth_getCode", [address, "latest"]));
+    return hasContractCode(code) ? code : hexSchema.parse("0x");
   }
 
   public async call(transaction: RpcCall, overrides?: RpcStateOverrides): Promise<Hex> {

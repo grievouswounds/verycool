@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, unlink } from "node:fs/promises";
 import { hexSchema, parseRuntimeManifest, runtimeManifestHash, type Hex, type RuntimeManifest } from "@aqua/core";
 import { signPersonalMessage, signingKeyAddress } from "@aqua/evm";
 import { z } from "zod";
@@ -9,6 +10,12 @@ export const GATEWAY_NAME = "Aqua transaction preparation API";
 /** Foundry Anvil account 0; used only against the local SIWE issuer. */
 export const ANVIL_ACCOUNT_ZERO_KEY = hexSchema.parse("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
 export const VERCEL_STAGING_DIR = "out/vercel";
+export const HOSTED_VERCEL_CONFIG = {
+  $schema: "https://openapi.vercel.sh/vercel.json",
+  bunVersion: "1.x",
+  framework: "bun",
+  functions: { "src/server.js": { maxDuration: 60 } },
+} as const;
 
 const challengeResponseSchema = z.object({ challengeId: z.uuid(), message: z.string().min(1) }).loose();
 const sessionResponseSchema = z.object({ accessToken: z.string().min(1), expiresIn: z.number().int().positive() }).loose();
@@ -29,6 +36,8 @@ const openApiSchema = z.object({
 }).loose();
 
 export const parseVercelDeploymentUrl = (text: string): string | undefined => {
+  const aliased = /Aliased\s+(https:\/\/[a-z0-9.-]+\.vercel\.app)/u.exec(text);
+  if (aliased?.[1] !== undefined) return aliased[1];
   const match = /https:\/\/[a-z0-9.-]+\.vercel\.app/u.exec(text);
   return match?.[0];
 };
@@ -48,7 +57,6 @@ export const rewriteManifestPublicOrigin = (manifest: RuntimeManifest, origin: s
 };
 
 const fail = (message: string): never => {
-  console.error(message);
   throw new Error(message);
 };
 
@@ -104,13 +112,26 @@ const mintSiweAccessToken = async (origin: string, signingKey: Hex): Promise<str
   return session.accessToken;
 };
 
+const teeText = async (stream: ReadableStream<Uint8Array>, dest: NodeJS.WriteStream): Promise<string> => {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value === undefined) continue;
+    chunks.push(value);
+    dest.write(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+};
+
 const runCaptured = async (command: string, args: readonly string[], options: { stdin?: string } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
   const child = Bun.spawn([command, ...args], {
-    stdout: "pipe", stderr: "pipe", env: Bun.env,
+    stdout: "pipe", stderr: "pipe",
+    env: { ...Bun.env, CI: "1" },
     stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
   });
-  const stdout = await new Response(child.stdout).text();
-  const stderr = await new Response(child.stderr).text();
+  const [stdout, stderr] = await Promise.all([teeText(child.stdout, process.stdout), teeText(child.stderr, process.stderr)]);
   return { stdout, stderr, exitCode: await child.exited };
 };
 
@@ -139,22 +160,31 @@ export const buildVercelBundle = async (root: string): Promise<string> => {
     type: "module",
     scripts: { build: "echo skip" },
   }, null, 2)}\n`);
-  await Bun.write(`${staging}/vercel.json`, `${JSON.stringify({ bunVersion: "1.x", installCommand: "echo skip", buildCommand: "echo skip" }, null, 2)}\n`);
-  const install = Bun.spawn([bun, "install"], { cwd: staging, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: Bun.env });
+  await Bun.write(`${staging}/vercel.json`, `${JSON.stringify(HOSTED_VERCEL_CONFIG, null, 2)}\n`);
+  const stagingLink = `${staging}/.vercel/project.json`;
+  const rootLink = `${root}/.vercel/project.json`;
+  if (existsSync(stagingLink) && existsSync(rootLink)) {
+    const stagingProject = z.object({ projectId: z.string() }).loose().parse(JSON.parse(await Bun.file(stagingLink).text()));
+    const rootProject = z.object({ projectId: z.string() }).loose().parse(JSON.parse(await Bun.file(rootLink).text()));
+    if (stagingProject.projectId === rootProject.projectId) await unlink(stagingLink);
+  }
+  const install = Bun.spawn([bun, "install"], { cwd: staging, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: { ...Bun.env, CI: "1" } });
   const stderr = await new Response(install.stderr).text();
   if (await install.exited !== 0) fail(`staging bun install failed:\n${stderr}`);
   return staging;
 };
 
-const upsertVercelEnv = async (name: string, value: string, environment: "production" | "preview" = "production"): Promise<void> => {
+const upsertVercelEnv = async (cwd: string, name: string, value: string, environment: "production" | "preview" = "production"): Promise<void> => {
   const [cli, ...prefix] = vercelCli();
-  await runCaptured(cli, [...prefix, "env", "rm", name, environment, "--yes"]);
-  const added = await runCaptured(cli, [...prefix, "env", "add", name, environment], { stdin: `${value}\n` });
+  console.error(`upserting ${name} (${environment})`);
+  await runCaptured(cli, [...prefix, "env", "rm", name, environment, "--yes", "--cwd", cwd]);
+  const added = await runCaptured(cli, [...prefix, "env", "add", name, environment, "--yes", "--cwd", cwd], { stdin: `${value}\n` });
   if (added.exitCode !== 0) fail(`vercel env add ${name} failed:\n${added.stderr}\n${added.stdout}`);
 };
 
 export const deployToVercel = async (staging: string): Promise<string> => {
   const [cli, ...prefix] = vercelCli();
+  console.error(`deploying ${staging} to Vercel production`);
   const deployed = await runCaptured(cli, [...prefix, "deploy", "--prod", "--yes", "--cwd", staging]);
   if (deployed.exitCode !== 0) fail(`vercel deploy failed:\n${deployed.stderr}\n${deployed.stdout}`);
   const url = parseVercelDeploymentUrl(`${deployed.stdout}\n${deployed.stderr}`);
@@ -166,6 +196,9 @@ const loadProductionManifest = async (stateDir: string): Promise<RuntimeManifest
   const fromEnv = Bun.env["AQUA_RUNTIME_MANIFEST"]?.trim();
   if (fromEnv !== undefined && fromEnv.length > 0) return parseRuntimeManifest(fromEnv);
   const path = `${stateDir}/runtime-manifest.production.json`;
+  if (!existsSync(path)) {
+    return fail(`Missing ${path}. Run bun scripts/deploy-public-chain.ts first so it can reuse the pinned Sepolia contracts and write that file.`);
+  }
   return parseRuntimeManifest(await Bun.file(path).text());
 };
 
@@ -195,16 +228,22 @@ const deploy = async (): Promise<void> => {
   const databaseUrl = pooledDatabaseUrl();
   Bun.env["DATABASE_URL"] = databaseUrl;
 
+  if (Bun.which("vercel") === null) {
+    console.error("vercel CLI is not on PATH; using bunx vercel@latest. Install it with `npm i -g vercel` to skip the download and interactive prompts.");
+  }
   requireCommand("baz", "Install @bazantic/cli and run `baz login` with gateway:read and gateway:write.");
+  console.error("checking baz session");
   const whoami = whoamiSchema.parse(await runJson("baz", ["whoami", "--json"]));
   if (!whoami.ok || !whoami.signedIn) fail("baz is not signed in. Run `baz login`.");
   if (!whoami.scopes.includes("gateway:write")) fail("this baz session lacks gateway:write; run `baz login` again.");
 
+  console.error("migrating database");
   const migrate = await runCaptured(requireCommand("bun", "Install Bun to run migrations."), ["scripts/migrate.ts"]);
   if (migrate.exitCode !== 0) fail(`database migration failed:\n${migrate.stderr}\n${migrate.stdout}`);
 
   let manifest = await loadProductionManifest(stateDir);
   const existingOrigin = Bun.env["AQUA_VERCEL_URL"]?.trim();
+  console.error("bundling hosted API");
   const staging = await buildVercelBundle(process.cwd());
   const pushRuntimeEnv = async (current: RuntimeManifest): Promise<void> => {
     const agent = envOr("AQUA_AGENT_KEY", "");
@@ -214,14 +253,19 @@ const deploy = async (): Promise<void> => {
     if (agent.length === 0 || facilitator.length === 0 || keeper.length === 0 || paseto.length === 0) {
       fail("AQUA_AGENT_KEY, AQUA_FACILITATOR_KEY, AQUA_KEEPER_KEY, and PASETO_V4_SECRET_KEY are required for AQUA_SIGNER=env");
     }
-    await upsertVercelEnv("AQUA_RUNTIME_MANIFEST", JSON.stringify(current));
-    await upsertVercelEnv("AQUA_SIGNER", "env");
-    await upsertVercelEnv("AQUA_AGENT_KEY", agent);
-    await upsertVercelEnv("AQUA_FACILITATOR_KEY", facilitator);
-    await upsertVercelEnv("AQUA_KEEPER_KEY", keeper);
-    await upsertVercelEnv("PASETO_V4_SECRET_KEY", paseto);
+    await upsertVercelEnv(staging, "DATABASE_URL", databaseUrl);
+    await upsertVercelEnv(staging, "AQUA_RUNTIME_MANIFEST", JSON.stringify(current));
+    await upsertVercelEnv(staging, "AQUA_SIGNER", "env");
+    await upsertVercelEnv(staging, "AQUA_AGENT_KEY", agent);
+    await upsertVercelEnv(staging, "AQUA_FACILITATOR_KEY", facilitator);
+    await upsertVercelEnv(staging, "AQUA_KEEPER_KEY", keeper);
+    await upsertVercelEnv(staging, "PASETO_V4_SECRET_KEY", paseto);
   };
   let origin: string;
+  if (!existsSync(`${staging}/.vercel/project.json`)) {
+    console.error("creating hosted API Vercel project");
+    origin = await deployToVercel(staging);
+  }
   if (existingOrigin !== undefined && existingOrigin.length > 0) {
     origin = existingOrigin.replace(/\/$/u, "");
     manifest = rewriteManifestPublicOrigin(manifest, origin);
@@ -240,6 +284,7 @@ const deploy = async (): Promise<void> => {
     }
   }
 
+  console.error(`waiting for ${origin} /health/live`);
   await waitForPublicOrigin(origin);
   const token = await mintSiweAccessToken(origin, signingKey);
   const tokenPath = `${stateDir}/bazantic-access.token`;
@@ -294,7 +339,9 @@ const deploy = async (): Promise<void> => {
 if (import.meta.main) {
   try {
     await deploy();
-  } catch {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
     process.exit(1);
   }
 }
