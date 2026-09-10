@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseRuntimeManifest, runtimeManifestHash, runtimeManifestSchema } from "../src/runtime.ts";
+import { loadRuntimeManifest, parseRuntimeManifest, runtimeManifestHash, runtimeManifestSchema } from "../src/runtime.ts";
 
 const address = (digit: string) => `0x${digit.repeat(40)}`;
 const hash = (digit: string) => `0x${digit.repeat(64)}`;
@@ -26,5 +26,17 @@ describe("runtime manifest", () => {
 
   test("rejects stale content", () => {
     expect(() => parseRuntimeManifest(JSON.stringify({ ...manifest, manifestHash: hash("f") }))).toThrow("hash mismatch");
+  });
+
+  test("loads the manifest from AQUA_RUNTIME_MANIFEST when --config is absent", async () => {
+    const withHash = { ...manifest, manifestHash: runtimeManifestHash(manifest) };
+    const previous = Bun.env["AQUA_RUNTIME_MANIFEST"];
+    Bun.env["AQUA_RUNTIME_MANIFEST"] = JSON.stringify(withHash);
+    try {
+      expect(await loadRuntimeManifest([])).toEqual(withHash);
+    } finally {
+      if (previous === undefined) delete Bun.env["AQUA_RUNTIME_MANIFEST"];
+      else Bun.env["AQUA_RUNTIME_MANIFEST"] = previous;
+    }
   });
 });

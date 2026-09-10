@@ -27,8 +27,16 @@ Prerequisites are Nix with flakes enabled. The development shell provides Bun, A
 
 There are two local stacks. Both start PostgreSQL, Anvil, the x402 facilitator, the API, and both workers. Only the key-custody source differs. The emulated path is local-only and is never production.
 
+Every operational command accepts the same Ledger flag:
+
+- `--dev` or `--ledger emulator` — Speculos emulator signer (local development)
+- `--prod` or `--ledger physical` — USB Ledger via node-HID (asks you to confirm on device)
+
+`AQUA_LEDGER=emulator|physical` is the matching environment form. Unprefixed `dev` / `start` still default to a physical Ledger.
+
 ```sh
-nix develop -c dev
+nix develop -c -- dev --prod
+nix develop -c -- dev --dev
 ```
 
 On the first physical-Ledger run, connect an unlocked Ledger and quit Ledger Live. The launcher provisions the service broker keys from the device. The API listens on `http://localhost:8787`; open Swagger at `http://localhost:8787/docs` or check readiness at `http://localhost:8787/health/ready`.
@@ -45,14 +53,14 @@ docker compose up --build
 
 Raise the WSL2 memory allocation before the first image build; Speculos and the Ledger apps compile from source. Persist `WALLET_PASS` across restarts in the container data volume so the keyring stays decryptable.
 
-Both `nix develop -c dev` and `nix run .#dev` use API hot reload on the physical path. Use `nix develop -c start` / `nix run .#start` for that stack without hot reload, and `nix develop -c start-emulated` for the emulated equivalent. Run `nix develop -c ledger-bootstrap` for explicit device diagnostics or recovery.
+Both `nix develop -c -- dev --prod` and `nix run .#dev` use API hot reload on the physical path. Pass `--dev` for Speculos. Use `nix develop -c -- start --prod` for that stack without hot reload, and `nix develop -c start-emulated` (or `start --dev`) for the emulated equivalent. The same `--dev` / `--prod` flags apply to `deploy`, `ledger-bootstrap`, `e2e`, `mcp-check`, `enroll-ledger`, and `apps/mcp-bridge`. Run `nix develop -c ledger-bootstrap --prod` for explicit device diagnostics or recovery.
 
 ## Toolchain
 
 - `nix develop` installs dependencies with Aube and exposes the complete toolchain without leaving background processes behind. The `dev`/`start` supervisor owns PostgreSQL initialization and migrations. Change dependencies only with Aube (`aube add`, `aube remove`); the lockfile is authoritative and produced by Aube 1.17.
 - Run `aube run check` for strict TypeScript, 100% type coverage, zero-`any` AST inspection, ESLint, tests, dependency policy, and the production bundle.
 - Run `aube run codegen:check` to verify the committed Cubane selector manifest.
-- Enter the reproducible shell with `nix develop`. `aube run dev`, `dev`, and `nix develop -c dev` all launch the physical-Ledger hot-reload stack; `nix develop -c dev-emulated` launches the Speculos stack. `aube run start` and `nix develop -c start` launch the physical stack without hot reload. `aube run deploy` starts that API through `nix develop` when it is not already up, then tunnels it and registers a Bazantic gateway draft.
+- Enter the reproducible shell with `nix develop`. `dev --prod` and `nix develop -c -- dev --prod` launch the physical-Ledger hot-reload stack; `dev --dev` or `nix develop -c dev-emulated` launches the Speculos stack. `start --prod` launches the physical stack without hot reload. `aube run deploy --dev` or `deploy --prod` bundles the API and facilitator, deploys them to Vercel, and registers a Bazantic gateway draft.
 
 ### Command reference
 
@@ -91,7 +99,7 @@ aube run codegen                   # regenerate committed Cubane selectors
 aube run codegen:check             # fail when generated selectors are stale
 aube run docs:check                # check OpenAPI/native-route synchronization
 aube run check                     # complete local acceptance suite
-aube run deploy                    # start API via nix if needed, tunnel, register Bazantic draft
+aube run deploy                    # bundle API+facilitator, deploy to Vercel, register Bazantic draft
 aube run test:mcp                  # headless MCPJam checks against the gateway, stdio bridge, or both
 ```
 
@@ -100,14 +108,15 @@ Nix:
 ```sh
 nix flake check                    # evaluate and build checks for this system
 nix develop                         # enter the complete native toolchain
-nix develop -c dev                 # physical Ledger development stack
-nix develop -c dev-emulated        # Speculos development stack (Docker on macOS)
-nix develop -c start               # physical Ledger stack, no hot reload
+nix develop -c -- dev --prod       # physical Ledger development stack
+nix develop -c -- dev --dev        # Speculos development stack (Docker on macOS)
+nix develop -c dev-emulated        # same as dev --dev
+nix develop -c -- start --prod     # physical Ledger stack, no hot reload
 nix develop -c start-emulated      # Speculos stack, no hot reload
 nix run .#dev                      # start the physical stack without entering a shell
 nix run .#start                    # start the complete non-hot physical stack
 nix develop -c deploy              # same as aube run deploy (needs live API + baz login)
-nix run .#deploy                   # publish the local API through a quick tunnel
+nix run .#deploy                   # publish the hosted API on Vercel
 nix develop -c mcp-check gateway   # headless MCPJam doctor + tools/list against the Bazantic MCP URL
 nix run .#mcp-check                # same checks; pass gateway, bridge, or all
 nix run .#api -- --config /absolute/path/runtime-manifest.json # API only
@@ -200,7 +209,7 @@ Send either body to `POST /v1/erc20-monitor/actions/wipe`. A pure incoming trans
 
 `apps/mcp-bridge` exposes exactly `request_trade`, `post_trade`, `get_trades`, `cancel_trade`, `subscribe_to_user`, `unsubscribe_from_user`, and `wipe_subscribed_trades` over stdio. On first start its isolated signer runs `wallet-cli ring init` when required, creates a random secp256k1 agent key, and writes only LKRP ciphertext plus the public address. Decryption and signing happen only in the child signer process; plaintext key material is never printed or persisted. After authentication the bridge automatically proves possession of and binds that agent. Fund the displayed agent with native gas and sell assets, then register the suggested Ledger delegation before the first trade.
 
-The bridge discovers the Bun API's OAuth metadata, registers a loopback client, opens the Ledger FIDO2 authorization ceremony in the browser, and stores its rotating refresh token in a mode-0600 local cache. Its audience is the Bun API resource URI, not a remote MCP URL. `AQUA_ACCESS_TOKEN` remains an explicit development override. Set `AQUA_API_URL` when it differs from `http://127.0.0.1:3000`; `AQUA_OAUTH_CALLBACK_PORT` defaults to `41739`. Optional `AQUA_AGENT_CIPHERTEXT`, `AQUA_AGENT_METADATA`, `AQUA_PREVIEW_CACHE`, and `AQUA_OAUTH_CACHE` paths relocate local state.
+The bridge discovers the Bun API's OAuth metadata, registers a loopback client, opens the Ledger FIDO2 authorization ceremony in the browser, and stores its rotating refresh token in a mode-0600 local cache. Its audience is the Bun API resource URI, not a remote MCP URL. `AQUA_ACCESS_TOKEN` remains an explicit development override. Set `AQUA_API_URL` when it differs from `http://127.0.0.1:3000`; `AQUA_OAUTH_CALLBACK_PORT` defaults to `41739`. Optional `AQUA_AGENT_CIPHERTEXT`, `AQUA_AGENT_METADATA`, `AQUA_PREVIEW_CACHE`, and `AQUA_OAUTH_CACHE` paths relocate local state. Pass `--dev` for the Speculos signer or `--prod` for a physical Ledger; MCPJam should put the same flag in the stdio args (or set `AQUA_LEDGER`).
 
 ### Bazantic discovery and x402 payments
 
@@ -210,7 +219,7 @@ The same isolated LKRP/Cubane signer serves both payment profiles, but they are 
 
 The Bazantic CLI, hosted grants, and `BAZANTIC_GATEWAY_PRIVATE_KEY` are not runtime dependencies. 1inch Aqua quotes remain local SwapVM `eth_call` simulations; `ONEINCH_API_KEY` enables only optional spot-price endpoints.
 
-`aube run deploy` (or `nix develop -c deploy`) starts the local API through `nix develop` when `http://127.0.0.1:8787/health/live` is down: `dev` if `.data/keyring` is complete, otherwise `dev-emulated` (override with `AQUA_DEPLOY_STACK`). It leaves `services.apiUrl` on `http://localhost:8787`, opens a free `cloudflared` quick tunnel, mints a SIWE PASETO against Anvil account 0, and runs `baz gateway add` as a draft (`--auth-type api-key`). It writes `.data/bazantic-gateway.json` and a mode-0600 `.data/bazantic-access.token`, then holds the tunnel (and any stack it started) until interrupted. Prerequisites: `baz login` with `gateway:write`, Nix, and `cloudflared` (provided in `nix develop`). Finish in the Bazantic dashboard: bearer delivery of that token, per-method prices, then activate. MCPJam should use the local stdio bridge (`bun apps/mcp-bridge/src/main.ts`, `AQUA_API_URL=http://localhost:8787`, `XDG_STATE_HOME` under `.data/aqua-mcp-state`), not the hosted `{endpointUrl}/mcp` as a tool-calling transport. A SIWE token reaches health, capabilities, OpenAPI, `/v1/trading`, prices, Aqua quotes, and ERC-20 monitor reads; `/v1/trades`, trade previews, delegations, agent binding, and trade subscriptions still require hardware AMR and belong on the local stdio `aqua-mcp` bridge. Quick-tunnel hostnames change on every restart, so each deploy registers a new draft. The generated `{endpointUrl}/mcp` is discovery-only (`tools/list`); ordinary MCP clients cannot settle its `402`, so paid traffic uses `baz curl`. Override `AQUA_API_URL`, `AQUA_TUNNEL_URL`, `AQUA_DEPLOY_SIGNING_KEY`, or `AQUA_DEPLOY_HOLD_TUNNEL=0` when needed.
+`aube run deploy` (or `nix develop -c deploy`) bundles `apps/api` and `apps/facilitator` into `out/vercel`, deploys that artifact to Vercel (`vercel deploy --prod`), and runs `baz gateway add` as a draft (`--auth-type api-key`). It mints a SIWE PASETO against `AQUA_DEPLOY_SIGNING_KEY` (defaults to Anvil account 0; set a fresh key for a public gateway) and writes `.data/bazantic-gateway.json` plus a mode-0600 `.data/bazantic-access.token`. Prerequisites: `baz login` with `gateway:write`, a production runtime manifest at `.data/runtime-manifest.production.json` (from `bun scripts/deploy-public-chain.ts` on Ethereum Sepolia), Neon Postgres `DATABASE_URL` (pooled `-pooler` host), env signing keys (`AQUA_SIGNER=env`), and the Vercel CLI (`vercel` on PATH or `bunx vercel`). Finish in the Bazantic dashboard: bearer delivery of that token, per-method prices, then activate. MCPJam should use the local stdio bridge (`bun apps/mcp-bridge/src/main.ts --dev` or `--prod`, `AQUA_API_URL` pointing at the Vercel origin, `XDG_STATE_HOME` under `.data/aqua-mcp-state`), not the hosted `{endpointUrl}/mcp` as a tool-calling transport. A SIWE token reaches health, capabilities, OpenAPI, `/v1/trading`, prices, Aqua quotes, and ERC-20 monitor reads; `/v1/trades`, trade previews, delegations, agent binding, and trade subscriptions still require hardware AMR and belong on the local stdio `aqua-mcp` bridge. The generated `{endpointUrl}/mcp` is discovery-only (`tools/list`); ordinary MCP clients cannot settle its `402`, so paid traffic uses `baz curl`. Override `AQUA_VERCEL_URL` or `AQUA_DEPLOY_SIGNING_KEY` when needed. Local `dev`/`start`, Anvil, Speculos, and the worker loops stay on your machine and can point at the hosted database and chain.
 
 ## Configuration
 

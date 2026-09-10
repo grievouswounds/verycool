@@ -40,7 +40,26 @@ export interface BrokerAccessTokenGrant {
   readonly clientId: string;
 }
 
-export class SecretBrokerClient {
+export type BrokerDigestRequest = Extract<BrokerRequest, { method: "signDigest" }>["params"];
+export interface BrokerEip1559Transaction {
+  readonly chainId: bigint;
+  readonly nonce: bigint;
+  readonly maxPriorityFeePerGas: bigint;
+  readonly maxFeePerGas: bigint;
+  readonly gas: bigint;
+  readonly to: Address;
+  readonly value: bigint;
+  readonly data: Hex;
+};
+
+export interface SecretBroker {
+  identity(): Promise<z.infer<typeof brokerIdentitySchema>>;
+  issuePaseto(grant: BrokerAccessTokenGrant): Promise<string>;
+  signEip1559(transaction: BrokerEip1559Transaction, purpose?: "keeper" | "facilitator"): Promise<Hex>;
+  signDigest(parameters: BrokerDigestRequest): Promise<Hex>;
+}
+
+export class SecretBrokerClient implements SecretBroker {
   private readonly socketPath: string;
   private readonly timeoutMs: number;
   public constructor(socketPath: string, timeoutMs = 5_000) { this.socketPath = socketPath; this.timeoutMs = timeoutMs; }
@@ -74,5 +93,17 @@ export class SecretBrokerClient {
     const result = await this.request("issuePaseto", grant, z.object({ token: z.string().min(1) }).strict());
     return result.token;
   }
-  public async signEip1559(transaction:{readonly chainId:bigint;readonly nonce:bigint;readonly maxPriorityFeePerGas:bigint;readonly maxFeePerGas:bigint;readonly gas:bigint;readonly to:Address;readonly value:bigint;readonly data:Hex},purpose:"keeper"|"facilitator"="keeper"):Promise<Hex>{const params={purpose,chainId:transaction.chainId.toString(),nonce:transaction.nonce.toString(),maxPriorityFeePerGas:transaction.maxPriorityFeePerGas.toString(),maxFeePerGas:transaction.maxFeePerGas.toString(),gas:transaction.gas.toString(),to:transaction.to,value:transaction.value.toString(),data:transaction.data};const result=await this.request("signEip1559",params,z.object({rawTransaction:hexSchema}).strict());return result.rawTransaction;}
+  public async signEip1559(transaction: BrokerEip1559Transaction, purpose: "keeper" | "facilitator" = "keeper"): Promise<Hex> {
+    const params = {
+      purpose, chainId: transaction.chainId.toString(), nonce: transaction.nonce.toString(),
+      maxPriorityFeePerGas: transaction.maxPriorityFeePerGas.toString(), maxFeePerGas: transaction.maxFeePerGas.toString(),
+      gas: transaction.gas.toString(), to: transaction.to, value: transaction.value.toString(), data: transaction.data,
+    };
+    const result = await this.request("signEip1559", params, z.object({ rawTransaction: hexSchema }).strict());
+    return result.rawTransaction;
+  }
+  public async signDigest(parameters: BrokerDigestRequest): Promise<Hex> {
+    const result = await this.request("signDigest", parameters, brokerSignatureSchema);
+    return result.signature;
+  }
 }

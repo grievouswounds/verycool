@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { BazanticCatalogClient } from "@aqua/bazantic";
 import { requiredAquaTools, type AquaMcpToolName } from "../apps/mcp-bridge/src/bazantic-tools.ts";
+import { applyLedgerArgv, type LedgerMode } from "./ledger-mode.ts";
 import { z } from "zod";
 
 export const MCP_CHECK_MODES = ["gateway", "bridge", "all"] as const;
@@ -118,31 +119,43 @@ const checkGateway = async (mcpjam: string, root: string): Promise<void> => {
   console.log(JSON.stringify({ ok: true, mode: "gateway", slug, mcpUrl }));
 };
 
-const checkBridge = async (mcpjam: string, bun: string, root: string): Promise<void> => {
+const checkBridge = async (mcpjam: string, bun: string, root: string, ledger: LedgerMode): Promise<void> => {
   assertHardwareAmrPath(Bun.env);
   const stateHome = envOr("XDG_STATE_HOME", `${root}/.data/aqua-mcp-state`);
   const oauthPath = envOr("AQUA_OAUTH_CACHE", `${stateHome}/oauth.json`);
   if (!await oauthCacheIsFresh(oauthPath)) {
-    fail(`OAuth cache at ${oauthPath} is missing or expired. Warm it once with bun ${root}/apps/mcp-bridge/src/main.ts (AQUA_API_URL=http://localhost:8787, XDG_STATE_HOME=${stateHome}), then retry.`);
+    fail(`OAuth cache at ${oauthPath} is missing or expired. Warm it once with bun ${root}/apps/mcp-bridge/src/main.ts --${ledger === "emulator" ? "dev" : "prod"} (AQUA_API_URL=http://localhost:8787, XDG_STATE_HOME=${stateHome}), then retry.`);
   }
   const apiUrl = envOr("AQUA_API_URL", "http://localhost:8787");
   const rpcUrl = envOr("AQUA_RPC_URL", "http://127.0.0.1:8545");
-  const envFlags = ["-e", `AQUA_API_URL=${apiUrl}`, "-e", `AQUA_RPC_URL=${rpcUrl}`, "-e", `XDG_STATE_HOME=${stateHome}`];
+  const envFlags = [
+    "-e", `AQUA_API_URL=${apiUrl}`,
+    "-e", `AQUA_RPC_URL=${rpcUrl}`,
+    "-e", `XDG_STATE_HOME=${stateHome}`,
+    "-e", `AQUA_LEDGER=${ledger}`,
+    "-e", `AQUA_LEDGER_TRANSPORT=${Bun.env["AQUA_LEDGER_TRANSPORT"] ?? (ledger === "emulator" ? "speculos" : "node-hid")}`,
+  ];
+  if (ledger === "emulator") {
+    envFlags.push("-e", "AQUA_E2E=1");
+    if (Bun.env["AQUA_WALLET_CLI"] !== undefined) envFlags.push("-e", `AQUA_WALLET_CLI=${Bun.env["AQUA_WALLET_CLI"]}`);
+    if (Bun.env["AQUA_SPECULOS_URL"] !== undefined) envFlags.push("-e", `AQUA_SPECULOS_URL=${Bun.env["AQUA_SPECULOS_URL"]}`);
+  }
   const gatewaySlug = Bun.env["AQUA_BAZANTIC_GATEWAY_SLUG"]?.trim();
   if (gatewaySlug !== undefined && gatewaySlug.length > 0) envFlags.push("-e", `AQUA_BAZANTIC_GATEWAY_SLUG=${gatewaySlug}`);
   const stdio = ["--command", bun, "--args", "apps/mcp-bridge/src/main.ts", "--cwd", root, ...envFlags, "--quiet", "--format", "json"] as const;
   assertDoctorReady(await runJson(mcpjam, ["server", "doctor", ...stdio]), "bridge");
   assertToolCatalog(await runJson(mcpjam, ["tools", "list", ...stdio]), "bridge");
-  console.log(JSON.stringify({ ok: true, mode: "bridge", apiUrl, stateHome }));
+  console.log(JSON.stringify({ ok: true, mode: "bridge", ledger, apiUrl, stateHome }));
 };
 
 const main = async (): Promise<void> => {
-  const mode = parseMcpCheckMode(Bun.argv[2] ?? "all");
+  const parsed = applyLedgerArgv(Bun.argv.slice(2));
+  const mode = parseMcpCheckMode(parsed.rest[0] ?? "all");
   const root = envOr("AQUA_ROOT", process.cwd());
   const mcpjam = requireCommand("mcpjam", "Add @mcpjam/cli as a development dependency with aube so the binary is on PATH.");
   const bun = requireCommand("bun", "Enter the Nix shell so bun is on PATH.");
   if (mode === "gateway" || mode === "all") await checkGateway(mcpjam, root);
-  if (mode === "bridge" || mode === "all") await checkBridge(mcpjam, bun, root);
+  if (mode === "bridge" || mode === "all") await checkBridge(mcpjam, bun, root, parsed.mode);
 };
 
 if (import.meta.main) {

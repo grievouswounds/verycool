@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=scripts/ledger-mode.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ledger-mode.sh"
+aqua_consume_ledger_args --default physical "$@" || exit
+set -- "${AQUA_LEDGER_REST[@]}"
+aqua_apply_ledger_env
+
 state_dir="${AQUA_STATE_DIR:-$PWD/.data}"
 wallet_cli="${AQUA_WALLET_CLI:-wallet-cli}"
 ring_dir="$state_dir/keyring"

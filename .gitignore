@@ -13,6 +13,7 @@ node_modules/
 *.log
 
 # Solidity tool output
+cache/
 contracts/cache/
 contracts/out/
 contracts/broadcast/
@@ -26,6 +27,7 @@ typechain-types/
 
 # Local-chain deployments and generated runtime evidence
 .local-stack/
+.data/
 runtime-manifest.json
 runtime-manifest-*.json
 receipts/
@@ -39,8 +41,9 @@ reports/
 .env copy*
 !.env.example
 
-# Local service state
-.data/
+# Generated deploy artifacts
+out/
+
 .state/
 tmp/
 .tmp/
@@ -58,3 +61,4 @@ result-*
 .vscode/
 *.swp
 *~
+.vercel

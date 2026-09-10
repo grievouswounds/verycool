@@ -11,12 +11,15 @@ import {
   tradePreviewRequestSchema, tradesListQuerySchema,
 } from "@aqua/core";
 import type { Address, Hash, Hex } from "@aqua/core";
-import { hexToQuantity, JsonRpcClient } from "@aqua/evm";
+import { hexToQuantity, createPooledRpcClient } from "@aqua/evm";
 import { z } from "zod";
+import { applyLedgerArgv } from "../../../scripts/ledger-mode.ts";
 import { oauthAccessToken } from "./oauth.ts";
 import { signLedgerTypedData } from "./ledger.ts";
 import { retryAquaPayment } from "./payment.ts";
 import { discoverConfiguredAquaTools } from "./bazantic-tools.ts";
+
+applyLedgerArgv(Bun.argv.slice(2));
 
 const configurationSchema = z.object({
   apiUrl: z.url(), rpcUrl: z.url(), agent: addressSchema, signerProgram: z.string().min(1),
@@ -37,7 +40,7 @@ const oauthCachePath = Bun.env["AQUA_OAUTH_CACHE"] ?? `${stateRoot}/oauth.json`;
 const oauthCallbackPort = Number(Bun.env["AQUA_OAUTH_CALLBACK_PORT"] ?? "41739");
 const rpcUrl = Bun.env["AQUA_RPC_URL"] ?? "http://127.0.0.1:8545";
 const previewCachePath = Bun.env["AQUA_PREVIEW_CACHE"] ?? `${stateRoot}/previews.json`;
-const rpc = new JsonRpcClient(new URL(rpcUrl), localProfileDefaults.rpcTimeoutMs);
+const rpc = createPooledRpcClient({ id: Number.parseInt(Bun.env["AQUA_CHAIN_ID"] ?? "31337", 10), rpcUrl }, localProfileDefaults.rpcTimeoutMs);
 type BridgeConfig = z.infer<typeof configurationSchema>;
 interface Session {
   readonly accessToken: string;
@@ -100,10 +103,11 @@ const executePrerequisites = async (session: Session, preview: Readonly<Record<s
   const parsed = prerequisitesSchema.parse(preview["prerequisites"]); const hashes: Hash[] = [];
   for (const transaction of parsed.transactions) {
     if (transaction.from !== session.config.agent || transaction.chainId !== preview["chainId"]) throw new Error("Reviewed prerequisite transaction does not belong to the local agent and chain");
-    const [nonce, gasPrice, priority] = await Promise.all([rpc.transactionCount(session.config.agent), rpc.gasPrice(), rpc.maxPriorityFeePerGas()]);
-    const gas = transaction.gas === undefined ? await rpc.estimateGas({ from: session.config.agent, to: transaction.to, data: transaction.data, value: transaction.value }) : hexToQuantity(transaction.gas);
+    const pinned = rpc.session();
+    const [nonce, gasPrice, priority] = await Promise.all([pinned.transactionCount(session.config.agent), pinned.gasPrice(), pinned.maxPriorityFeePerGas()]);
+    const gas = transaction.gas === undefined ? await pinned.estimateGas({ from: session.config.agent, to: transaction.to, data: transaction.data, value: transaction.value }) : hexToQuantity(transaction.gas);
     const raw = await signTransaction(session.config, { chainId: transaction.chainId, nonce, maxPriorityFeePerGas: priority, maxFeePerGas: gasPrice * 2n + priority, gas, to: transaction.to, value: hexToQuantity(transaction.value), data: transaction.data });
-    const hash = await rpc.sendRawTransaction(raw); hashes.push(hash); await waitForReceipt(hash);
+    const hash = await pinned.sendRawTransaction(raw); hashes.push(hash); await waitForReceipt(hash);
   }
   return hashes;
 };

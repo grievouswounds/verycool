@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=scripts/ledger-mode.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ledger-mode.sh"
+aqua_consume_ledger_args --default physical "$@" || exit
+set -- "${AQUA_LEDGER_REST[@]}"
+aqua_apply_ledger_env
+
 mode="${1:-deterministic}"
 shift || true
 root="$(git rev-parse --show-toplevel)"
+if [[ "$mode" == physical && "$AQUA_LEDGER" == emulator ]]; then
+  echo "physical e2e requires --prod (or no --dev), not --dev" >&2
+  exit 2
+fi
+if [[ "$AQUA_LEDGER" == physical && "$mode" == deterministic ]]; then
+  mode=physical
+fi
 physical=0
 if [[ "$mode" == physical ]]; then physical=1; fi
 
