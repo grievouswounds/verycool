@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { addressSchema, hashSchema, hexSchema } from "@aqua/core";
 import { TriggerEvaluator } from "../src/index.ts";
 import type { BookPage, ChainCheckpoint, IndexedFill, IndexedOrder, KeeperJob, StoredIntent, TradingRepository, TriggerObservation, TriggerRepository } from "../src/index.ts";
+import type { ArmedTriggerLeg, TradeTriggerSource } from "../src/triggers.ts";
 
 const maker = addressSchema.parse("0x1111111111111111111111111111111111111111");
 const base = addressSchema.parse("0x2222222222222222222222222222222222222222");
@@ -40,5 +41,36 @@ describe("persistent full-depth triggers", () => {
     await evaluator.runOnce(10n, 100n); expect(triggers.jobs[0]?.data.slice(0, 10)).toBe("0xb1b0923a");
     await evaluator.runOnce(11n, 140n); expect(triggers.jobs).toHaveLength(1);
     await evaluator.runOnce(12n, 140n); expect(triggers.jobs[1]?.data.slice(0, 10)).toBe("0x5f330b0f");
+  });
+
+  test("enqueues a BoundedMatcher batch for an armed vault action", async () => {
+    const matcher = addressSchema.parse("0x5555555555555555555555555555555555555555");
+    const factory = addressSchema.parse("0x6666666666666666666666666666666666666666");
+    const executeCall = hexSchema.parse(`0x95d5857e${"11".repeat(32)}`);
+    const leg: ArmedTriggerLeg = {
+      id: "leg", tradeId: "trade", intentHash: digest, groupNonce: hashSchema.parse(`0x${"77".repeat(32)}`),
+      kind: "armed", role: "stop", pair: { baseToken: base, quoteToken: quote }, side: "sell",
+      size: { denomination: "base", amount: "1" }, triggerPrice: "100", trail: null, activationPrice: null,
+      highWater: null, executeCall, status: "armed",
+    };
+    class Armed implements TradeTriggerSource {
+      public firing: string | null = null;
+      public async listArmed() { return [leg]; }
+      public async saveHighWater() { return; }
+      public async markFiring(_id: string, jobId: string) { this.firing = jobId; }
+    }
+    class EmptyTrading extends Trading {
+      public override async listActiveIntents() { return []; }
+    }
+    const triggers = new Triggers();
+    const armed = new Armed();
+    const evaluator = new TriggerEvaluator(new EmptyTrading(), triggers, {
+      controller, matcher, factory, minimumBlocks: 1n, minimumSeconds: 1n,
+    }, armed);
+    await evaluator.runOnce(10n, 100n);
+    await evaluator.runOnce(12n, 140n);
+    expect(triggers.jobs.at(-1)?.target).toBe(matcher);
+    expect(triggers.jobs.at(-1)?.data.slice(0, 10)).toBe("0xc8d18a45");
+    expect(armed.firing).toBeString();
   });
 });

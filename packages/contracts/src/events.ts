@@ -3,7 +3,7 @@ import { addressSchema, hashSchema, validationError } from "@aqua/core";
 import type { Address, Hash, Hex, RpcLog } from "@aqua/core";
 import { bytesToHex, hexToBytes, keccakHex } from "@aqua/evm";
 import { decodeOrder } from "@aqua/evm";
-import { decodeProgram } from "./program.ts";
+import { decodeProgram, LIMIT_OPCODES } from "./program.ts";
 
 const eventTopic = (signature: string): Hash => keccakHex(new TextEncoder().encode(signature));
 export const AQUA_EVENT_TOPICS = {
@@ -59,10 +59,14 @@ export interface RecognizedLimitStrategy {
 export const recognizeLimitStrategy = (encodedOrder: Hex): RecognizedLimitStrategy => {
   const order = decodeOrder(encodedOrder);
   const instructions = decodeProgram(order.data);
-  if (instructions.length !== 5 || instructions[0]?.opcode !== 14 || instructions[1]?.opcode !== 31
-    || instructions[2]?.opcode !== 18 || !new Set([19, 21]).has(instructions[3]?.opcode ?? -1)
-    || !new Set([22, 23]).has(instructions[4]?.opcode ?? -1)) throw validationError("Unrecognized limit strategy instruction grammar");
-  const balanceBytes = hexToBytes(instructions[2].arguments);
+  const balances = instructions.find((item) => item.opcode === LIMIT_OPCODES.staticBalances);
+  const invalidator = instructions.find((item) => item.opcode === LIMIT_OPCODES.invalidateBit || item.opcode === LIMIT_OPCODES.invalidateTokenOut);
+  const limit = instructions.find((item) => item.opcode === LIMIT_OPCODES.limitSwap || item.opcode === LIMIT_OPCODES.limitSwapOnlyFull);
+  if (balances === undefined || invalidator === undefined || limit === undefined
+    || instructions[0]?.opcode !== LIMIT_OPCODES.deadline || instructions[1]?.opcode !== LIMIT_OPCODES.salt) {
+    throw validationError("Unrecognized limit strategy instruction grammar");
+  }
+  const balanceBytes = hexToBytes(balances.arguments);
   if (balanceBytes.length !== 106 || balanceBytes[0] !== 0 || balanceBytes[1] !== 2) throw validationError("Invalid static-balance instruction");
   const tokenIn = addressSchema.parse(bytesToHex(balanceBytes.slice(2, 22)));
   const tokenOut = addressSchema.parse(bytesToHex(balanceBytes.slice(22, 42)));

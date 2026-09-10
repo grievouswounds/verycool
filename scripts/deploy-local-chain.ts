@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { addressSchema, hashSchema, limitOrderRequestSchema, runtimeManifestSchema } from "@aqua/core";
+import { addressSchema, hashSchema, hexSchema, limitOrderRequestSchema, runtimeManifestSchema } from "@aqua/core";
 import { ProtocolService } from "@aqua/contracts";
-import { hexToBytes, JsonRpcClient, keccakHex } from "@aqua/evm";
+import { hexToBytes, initializeCubane, JsonRpcClient, keccakHex } from "@aqua/evm";
 import { z } from "zod";
 
 const env = (name: string): string => {
@@ -14,6 +14,7 @@ const log = (message: string, extra: Record<string, unknown> = {}): void => {
   console.log(JSON.stringify({ level: "info", component: "deploy-local-chain", message, ...extra }));
 };
 
+initializeCubane();
 const aquaRoot = env("AQUA_ROOT");
 const stateDir = env("AQUA_STATE_DIR");
 const rpcUrl = env("AQUA_LOCAL_RPC_URL");
@@ -36,6 +37,17 @@ const X402_EXACT_PROXY_ADDRESS = addressSchema.parse("0x402085c248eea27d92e8b30b
 const CREATE2_DEPLOYER = addressSchema.parse("0x4e59b44847b379578588920cA78FbF26c0B4956C");
 const X402_EXACT_SALT = "0x0000000000000000000000000000000000000000000000003000000007263b0e";
 const SWAP_SELECTOR = "0xf4d2d412";
+const ACTIVATE_SELECTOR = "0x5f330b0f";
+const OBSERVE_SELECTOR = "0xb1b0923a";
+const FACTORY_EXECUTE_SELECTOR = "0x95d5857e";
+const PERMIT2_CACHED_CHAIN_ID_IMMEDIATE = "467f0000000000000000000000000000000000000000000000000000000000007a69";
+const PERMIT2_REBUILD_CHAIN_ID_IMMEDIATE = "467f0000000000000000000000000000000000000000000000000000000000000001";
+const word = (value: string): string => value.replace(/^0x/u, "").padStart(64, "0");
+const permit2DomainSeparator = (chainId: bigint): string => {
+  const typeHash = keccakHex(new TextEncoder().encode("EIP712Domain(string name,uint256 chainId,address verifyingContract)"));
+  const nameHash = keccakHex(new TextEncoder().encode("Permit2"));
+  return keccakHex(hexToBytes(hexSchema.parse(`0x${word(typeHash)}${word(nameHash)}${word(`0x${chainId.toString(16)}`)}${word(PERMIT2_ADDRESS)}`)));
+};
 
 const identity = z.object({
   agent: addressSchema, facilitator: addressSchema, keeper: addressSchema, pasetoPublicKey: z.string(),
@@ -128,14 +140,18 @@ const sameAddress = (actual: string, expected: string): boolean => actual.toLowe
 const assertDeploymentBindings = async (contracts: z.infer<typeof contractsSchema>, tokens: readonly Deployed[]): Promise<void> => {
   for (const router of [contracts.aquaSwapRouter.address, contracts.limitSwapRouter.address]) {
     if (!sameAddress(await castCall(router, "AQUA()(address)"), contracts.aqua.address)) throw new Error(`Router ${router} has the wrong Aqua binding`);
-    if (!sameAddress(await castCall(router, "WETH()(address)"), contracts.wrappedNativeToken.address)) throw new Error(`Router ${router} has the wrong WETH binding`);
   }
   if (!sameAddress(await castCall(contracts.intentController.address, "operator()(address)"), identity.keeper)) throw new Error("Intent controller operator does not match broker keeper");
   if (!sameAddress(await castCall(contracts.boundedMatcher.address, "operator()(address)"), identity.keeper)) throw new Error("Bounded matcher operator does not match broker keeper");
   for (const router of [contracts.aquaSwapRouter.address, contracts.limitSwapRouter.address]) {
     if (await castCall(contracts.boundedMatcher.address, "allowed(address,bytes4)(bool)", [router, SWAP_SELECTOR]) !== "true") throw new Error(`Bounded matcher does not allow swap on ${router}`);
   }
+  if (await castCall(contracts.boundedMatcher.address, "allowed(address,bytes4)(bool)", [contracts.intentController.address, ACTIVATE_SELECTOR]) !== "true") throw new Error("Bounded matcher does not allow intent activate");
+  if (await castCall(contracts.boundedMatcher.address, "allowed(address,bytes4)(bool)", [contracts.intentController.address, OBSERVE_SELECTOR]) !== "true") throw new Error("Bounded matcher does not allow intent observe");
+  if (await castCall(contracts.boundedMatcher.address, "allowed(address,bytes4)(bool)", [contracts.orderVaultFactory.address, FACTORY_EXECUTE_SELECTOR]) !== "true") throw new Error("Bounded matcher does not allow vault factory execute");
   if (!sameAddress(await castCall(contracts.x402ExactPermit2Proxy.address, "PERMIT2()(address)"), PERMIT2_ADDRESS)) throw new Error("x402 exact proxy is not bound to canonical Permit2");
+  const permit2Separator = hashSchema.parse((await castCall(contracts.permit2.address, "DOMAIN_SEPARATOR()(bytes32)")).trim().split(/\s+/u)[0] ?? "");
+  if (permit2Separator !== permit2DomainSeparator(31337n)) throw new Error("Permit2 DOMAIN_SEPARATOR does not match canonical Permit2 on Anvil");
   const expectedTokens = [
     { symbol: "aUSD", decimals: "6", supply: "1000000000000" },
     { symbol: "aETH", decimals: "18", supply: "1000000000000000000000" },
@@ -193,10 +209,16 @@ const permit2Dir = `${buildDir}/permit2`;
 await prepareCopy(upstream.permit2, permit2Dir);
 // Use the exact precompiled runtime shipped by Permit2's own Anvil test helper. Compiling the
 // contract again is not equivalent because its EIP-712 cache contains constructor-patched immutables.
+// That cache was computed for whatever address originally produced the hex, not the canonical
+// Permit2 address, so invalidate the cached chain id and let DOMAIN_SEPARATOR recompute in place.
 const permit2Helper = await Bun.file(`${permit2Dir}/test/utils/DeployPermit2.sol`).text();
-const permit2Runtime = `0x${/bytes memory bytecode\s*=\s*hex"([0-9a-fA-F]+)"/u.exec(permit2Helper)?.[1] ?? ""}`;
+const permit2Runtime = `0x${/bytes memory bytecode\s*=\s*hex"([0-9a-fA-F]+)"/u.exec(permit2Helper)?.[1] ?? ""}`.toLowerCase();
 if (!/^0x[0-9a-fA-F]+$/u.test(permit2Runtime)) throw new Error("Permit2 forge inspect returned invalid runtime bytecode");
-await rpcRequest("anvil_setCode", [PERMIT2_ADDRESS, permit2Runtime]);
+if ((permit2Runtime.match(new RegExp(PERMIT2_CACHED_CHAIN_ID_IMMEDIATE, "g")) ?? []).length !== 1) {
+  throw new Error("Permit2 runtime must contain exactly one Anvil-cached chain-id DOMAIN_SEPARATOR immediate");
+}
+const permit2RuntimeForAnvil = permit2Runtime.replace(PERMIT2_CACHED_CHAIN_ID_IMMEDIATE, PERMIT2_REBUILD_CHAIN_ID_IMMEDIATE);
+await rpcRequest("anvil_setCode", [PERMIT2_ADDRESS, permit2RuntimeForAnvil]);
 const permit2: Deployed = { address: PERMIT2_ADDRESS, blockNumber: await currentBlock(), installation: "anvil-set-code" };
 if (await rpc.getCode(PERMIT2_ADDRESS) === "0x") throw new Error("Failed to install canonical Permit2 runtime code");
 
@@ -213,6 +235,7 @@ const tokenB = await forgeCreate({ cwd: fixturesDir, contractPath: "src/FixtureE
 const swapvmDir = `${buildDir}/swapvm`;
 await prepareCopy(upstream.swapvm, swapvmDir);
 await run(["bun", "install"], swapvmDir);
+// v1.0.2 stores WETH in OnlyWethReceiver's private immutable; AQUA() is the public binding check.
 const swapVmConstructorArgs = [aqua.address, weth.address, DEPLOYER_ADDRESS, "SwapVMRouter", "1.0.0"];
 const aquaSwapRouter = await forgeCreate({ cwd: swapvmDir, contractPath: "src/routers/AquaSwapVMRouter.sol", contractName: "AquaSwapVMRouter", constructorArgs: swapVmConstructorArgs });
 const limitSwapRouter = await forgeCreate({ cwd: swapvmDir, contractPath: "src/routers/LimitSwapVMRouter.sol", contractName: "LimitSwapVMRouter", constructorArgs: swapVmConstructorArgs });
@@ -235,7 +258,11 @@ const intentController = await forgeCreate({ cwd: contractsDir, contractPath: "s
 const orderVaultFactory = await forgeCreate({ cwd: contractsDir, contractPath: "src/AquaOrderVaultFactory.sol", contractName: "AquaOrderVaultFactory" });
 const boundedMatcher = await forgeCreate({
   cwd: contractsDir, contractPath: "src/BoundedMatcher.sol", contractName: "BoundedMatcher",
-  constructorArgs: [identity.keeper, `[${aquaSwapRouter.address},${limitSwapRouter.address}]`, `[${SWAP_SELECTOR},${SWAP_SELECTOR}]`],
+  constructorArgs: [
+    identity.keeper,
+    `[${aquaSwapRouter.address},${limitSwapRouter.address},${intentController.address},${intentController.address},${orderVaultFactory.address}]`,
+    `[${SWAP_SELECTOR},${SWAP_SELECTOR},${ACTIVATE_SELECTOR},${OBSERVE_SELECTOR},${FACTORY_EXECUTE_SELECTOR}]`,
+  ],
 });
 
 const contracts = { aqua, aquaSwapRouter, limitSwapRouter, wrappedNativeToken: weth, intentController, orderVaultFactory, boundedMatcher, permit2, x402ExactPermit2Proxy };

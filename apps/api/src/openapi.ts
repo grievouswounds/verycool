@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  activityListQuerySchema, activityWipeSchema, agentBindingRequestSchema, agentChallengeRequestSchema, challengeRequestSchema, delegationPreviewRequestSchema, delegationSubmitRequestSchema, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradePreviewRequestSchema, tradeSubmitRequestSchema, tradingRequestSchema,
+  activityListQuerySchema, activityWipeSchema, agentBindingRequestSchema, agentChallengeRequestSchema, challengeRequestSchema, delegationPreviewRequestSchema, delegationSubmitRequestSchema, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradeCancellationSubmitRequestSchema, tradePreviewRequestSchema, tradeSubmitRequestSchema, tradingRequestSchema,
 } from "@aqua/core";
 import { aquaQuoteRequestSchema } from "@aqua/quoter";
 
@@ -56,6 +56,7 @@ export const openApiDocument: Readonly<Record<string, unknown>> = {
       AquaQuoteRequest: schemaOf(aquaQuoteRequestSchema),
       TradePreviewRequest: schemaOf(tradePreviewRequestSchema),
       TradeSubmitRequest: schemaOf(tradeSubmitRequestSchema),
+      TradeCancellationSubmitRequest: schemaOf(tradeCancellationSubmitRequestSchema),
       AgentChallengeRequest: schemaOf(agentChallengeRequestSchema),
       AgentBindingRequest: schemaOf(agentBindingRequestSchema),
       DelegationPreviewRequest: schemaOf(delegationPreviewRequestSchema),
@@ -80,6 +81,17 @@ export const openApiDocument: Readonly<Record<string, unknown>> = {
       get: { ...securedReadOperation("getTrades", "Read own and/or subscribed trades with cursor pagination", "trade-lifecycle"), parameters: tradeQueryParameters() },
       post: { ...operation("postTrade", "Submit an exact reviewed preview; initial request returns x402 v2 PAYMENT-REQUIRED", "TradeSubmitRequest", true, "trade-lifecycle", { previewId: "00000000-0000-4000-8000-000000000000", previewHash: `0x${"00".repeat(32)}`, lifecycleSignature: `0x${"00".repeat(65)}` }), parameters: [{ name: "Idempotency-Key", in: "header", required: true, schema: { type: "string", format: "uuid" } }] },
     },
+    "/v1/trades/{tradeId}/cancellations": { post: {
+      operationId: "createTradeCancellation", tags: ["trade-lifecycle"], summary: "Create an agent-signed cancellation for a resting or armed trade",
+      security: [{ bearerAuth: [] }], parameters: [{ name: "tradeId", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: okResponse(),
+    } },
+    "/v1/trades/{tradeId}/cancellations/{cancellationId}": { put: {
+      ...operation("submitTradeCancellation", "Relay the agent-signed cancellation", "TradeCancellationSubmitRequest", true, "trade-lifecycle", { signature: `0x${"00".repeat(65)}` }),
+      parameters: [
+        { name: "tradeId", in: "path", required: true, schema: { type: "string", format: "uuid" } },
+        { name: "cancellationId", in: "path", required: true, schema: { type: "string", format: "uuid" } },
+      ],
+    } },
     "/v1/trade-subscriptions": { post: operation("subscribeToUser", "Subscribe to confirmed wallet trades", "ActivitySubscriptionRequest", true, "trade-lifecycle", { address: "0x1111111111111111111111111111111111111111" }) },
     "/v1/trade-subscriptions/{address}": { delete: { operationId: "unsubscribeFromUser", tags: ["trade-lifecycle"], summary: "Stop collecting a wallet without deleting stored trades", security: [{ bearerAuth: [] }], parameters: [{ name: "address", in: "path", required: true, schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } }], responses: okResponse() } },
     "/v1/trade-subscriptions/trades/wipe": { post: operation("wipeSubscribedTrades", "Delete subscribed trade projections without removing subscriptions", "SubscribedTradesWipeRequest", true, "trade-lifecycle", { scope: "address", address: "0x1111111111111111111111111111111111111111" }) },

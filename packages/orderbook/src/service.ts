@@ -1,4 +1,4 @@
-import { AppError, formatTokenAmount } from "@aqua/core";
+import { AppError, calculateLimitAmounts, formatTokenAmount, parseTokenAmount, positiveAmountSchema } from "@aqua/core";
 import type { Address, AuthenticatedPrincipal, TradingOrder, TradingRequest } from "@aqua/core";
 import type { IntentAuthorizationService } from "./authorization.ts";
 import type { BookLevel, IndexedFill, IndexedOrder, ProtocolGateway, TradingRepository } from "./types.ts";
@@ -8,6 +8,47 @@ export interface TradingHttpResult {
   readonly body: Readonly<Record<string, unknown>>;
   readonly headers?: Readonly<Record<string, string>>;
 }
+
+const asRecord = (value: unknown): Record<string, unknown> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Prepared plan is not an object");
+  return Object.fromEntries(Object.entries(value));
+};
+
+export interface MatchingReport {
+  readonly outcome: "fillsNow" | "rests" | "unfillable";
+  readonly expectedFillPrice: string | null;
+  readonly depthConsumedLevels: number;
+  readonly depthConsumedBaseUnits: string;
+  readonly unfilledRemainder: string | null;
+  readonly fokFeasible: boolean | null;
+}
+
+const requiredBaseUnits = (order: TradingOrder, price: string, baseDecimals: number, quoteDecimals: number): bigint =>
+  order.size.denomination === "base"
+    ? parseTokenAmount(positiveAmountSchema.parse(order.size.amount), baseDecimals)
+    : calculateLimitAmounts(order.side, order.size, price, baseDecimals, quoteDecimals).baseUnits;
+
+const matchingFromBook = (
+  order: TradingOrder, selected: readonly IndexedOrder[], remainingBase: bigint, requiredBase: bigint,
+): MatchingReport => {
+  const consumed = requiredBase < remainingBase ? requiredBase : remainingBase;
+  const unfilled = requiredBase > remainingBase ? requiredBase - remainingBase : 0n;
+  const tif = "timeInForce" in order ? order.timeInForce.kind : "ioc";
+  const decimals = selected[0]?.baseDecimals ?? 0;
+  return {
+    outcome: consumed > 0n ? "fillsNow" : "unfillable",
+    expectedFillPrice: selected[0]?.price ?? null,
+    depthConsumedLevels: selected.filter((item) => BigInt(item.remainingBaseUnits) > 0n).length,
+    depthConsumedBaseUnits: consumed.toString(),
+    unfilledRemainder: tif === "ioc" ? formatTokenAmount(unfilled, decimals) : null,
+    fokFeasible: tif === "fok" ? unfilled === 0n : null,
+  };
+};
+
+const restingMatch = (limitPrice: string): MatchingReport => ({
+  outcome: "rests", expectedFillPrice: limitPrice, depthConsumedLevels: 0, depthConsumedBaseUnits: "0",
+  unfilledRemainder: null, fokFeasible: null,
+});
 
 const requirePrincipal = (principal: AuthenticatedPrincipal | null): AuthenticatedPrincipal => {
   if (principal === null) throw new AppError(401, "urn:aqua:error:authentication", "Bearer access token is required for this action");
@@ -27,6 +68,58 @@ const comparePrices = (left: string, right: string): number => {
   const [ln, ld] = priceParts(left); const [rn, rd] = priceParts(right);
   const difference = ln * rd - rn * ld;
   return difference < 0n ? -1 : difference > 0n ? 1 : 0;
+};
+
+const invertPrice = (price: string): string => {
+  const [numerator, denominator] = priceParts(price);
+  if (numerator === 0n) return "0";
+  const whole = denominator / numerator;
+  const remainder = denominator % numerator;
+  if (remainder === 0n) return whole.toString(10);
+  const fraction = (remainder * 10n ** 36n / numerator).toString(10).padStart(36, "0").replace(/0+$/u, "");
+  return `${whole.toString(10)}.${fraction}`;
+};
+
+/** Reorients indexed orders onto the requested pair so aUSD/aETH bids are visible when selling aETH. */
+export const asRequestedPair = (orders: readonly IndexedOrder[], baseToken: Address, quoteToken: Address): readonly IndexedOrder[] => {
+  if (orders.length === 0) return orders;
+  if (orders[0]?.baseToken === baseToken && orders[0]?.quoteToken === quoteToken) return orders;
+  return orders.map((order) => {
+    const quoteUnits = calculateLimitAmounts(
+      order.side, { denomination: "base", amount: order.remainingBaseAmount }, order.price, order.baseDecimals, order.quoteDecimals,
+    ).quoteUnits;
+    const originalQuoteUnits = calculateLimitAmounts(
+      order.side, { denomination: "base", amount: order.originalBaseAmount }, order.price, order.baseDecimals, order.quoteDecimals,
+    ).quoteUnits;
+    return {
+      ...order, baseToken, quoteToken,
+      side: order.side === "sell" ? "buy" as const : "sell" as const,
+      price: invertPrice(order.price),
+      originalBaseAmount: formatTokenAmount(originalQuoteUnits, order.quoteDecimals),
+      remainingBaseAmount: formatTokenAmount(quoteUnits, order.quoteDecimals),
+      originalBaseUnits: originalQuoteUnits.toString(10), remainingBaseUnits: quoteUnits.toString(10),
+      baseDecimals: order.quoteDecimals, quoteDecimals: order.baseDecimals,
+    };
+  });
+};
+
+export const mergePairBooks = (
+  direct: readonly IndexedOrder[],
+  inverted: readonly IndexedOrder[],
+  baseToken: Address,
+  quoteToken: Address,
+): readonly IndexedOrder[] => {
+  const seen = new Set<string>();
+  const merged: IndexedOrder[] = [];
+  for (const order of [
+    ...asRequestedPair(direct, baseToken, quoteToken),
+    ...asRequestedPair(inverted, baseToken, quoteToken),
+  ]) {
+    if (seen.has(order.id)) continue;
+    seen.add(order.id);
+    merged.push(order);
+  }
+  return merged;
 };
 
 const executableOrders = (orders: readonly IndexedOrder[], takerSide: "buy" | "sell", limitPrice: string | null = null): readonly IndexedOrder[] =>
@@ -139,19 +232,56 @@ export class TradingService {
     authorizationHeader: string | null,
   ): Promise<TradingHttpResult> {
     if (needsDelegation(command.order)) return this.delegate(command, actor, authorizationHeader);
+    const orders = await this.pairBook(command.order.pair.baseToken, command.order.pair.quoteToken);
     if (command.order.kind === "market" || (command.order.kind === "limit" && (command.order.timeInForce.kind === "ioc" || command.order.timeInForce.kind === "fok"))) {
-      const orders = await this.repository.listPairOrders(command.order.pair.baseToken, command.order.pair.quoteToken);
-      const selected = executableOrders(orders, command.order.side, command.order.kind === "limit" ? command.order.limitPrice : null);
-      if (selected.length === 0) throw new AppError(409, "urn:aqua:error:no-liquidity", "No compatible executable Aqua order is available");
-      return this.ok(command.action, await this.protocol.prepareMarketRoute(command.order, selected, actor.address));
+      return this.takeLiquidity(command, actor, orders);
     }
     if (command.order.kind === "limit" && command.order.postPolicy !== "normal") {
-      const orders = await this.repository.listPairOrders(command.order.pair.baseToken, command.order.pair.quoteToken);
       if (executableOrders(orders, command.order.side, command.order.limitPrice).length > 0) {
         throw new AppError(409, "urn:aqua:error:crossing-post-policy", `${command.order.postPolicy} order would cross executable liquidity`);
       }
     }
+    if (command.order.kind === "limit") {
+      const selected = executableOrders(orders, command.order.side, command.order.limitPrice);
+      const sample = selected[0] ?? orders[0];
+      const baseDecimals = sample?.baseDecimals ?? 0; const quoteDecimals = sample?.quoteDecimals ?? 0;
+      const required = requiredBaseUnits(command.order, command.order.limitPrice, baseDecimals, quoteDecimals);
+      const depth = selected.reduce((sum, item) => sum + BigInt(item.remainingBaseUnits), 0n);
+      if (command.order.postPolicy === "normal" && depth >= required && required > 0n && selected.length > 0) {
+        return this.takeLiquidity(command, actor, orders);
+      }
+      const prepared = await this.protocol.prepareLimitFromTrading(command.order, actor.address);
+      return this.ok(command.action, { ...asRecord(prepared), matching: restingMatch(command.order.limitPrice) });
+    }
     return this.ok(command.action, await this.protocol.prepareLimitFromTrading(command.order, actor.address));
+  }
+
+  /** Always encode a shippable limit, even when the live book would fill it. Armed vault legs must not take liquidity now. */
+  public async encodeRestingLimit(order: TradingOrder, actor: AuthenticatedPrincipal): Promise<TradingHttpResult> {
+    if (order.kind !== "limit") throw new Error("Only plain limit orders can rest in a vault");
+    const prepared = await this.protocol.prepareLimitFromTrading(order, actor.address);
+    return this.ok("createOrder", { ...asRecord(prepared), matching: restingMatch(order.limitPrice) });
+  }
+
+  private async takeLiquidity(
+    command: Extract<TradingRequest, { readonly action: "createOrder" }>,
+    actor: AuthenticatedPrincipal,
+    orders: readonly IndexedOrder[],
+  ): Promise<TradingHttpResult> {
+    const order = command.order;
+    const limitPrice = order.kind === "limit" ? order.limitPrice : null;
+    const selected = executableOrders(orders, order.side, limitPrice);
+    if (selected.length === 0) throw new AppError(409, "urn:aqua:error:no-liquidity", "No compatible executable Aqua order is available");
+    const baseDecimals = selected[0]?.baseDecimals ?? 0; const quoteDecimals = selected[0]?.quoteDecimals ?? 0;
+    const price = order.kind === "limit" ? order.limitPrice : (selected[0]?.price ?? "0");
+    const required = requiredBaseUnits(order, price, baseDecimals, quoteDecimals);
+    const depth = selected.reduce((sum, item) => sum + BigInt(item.remainingBaseUnits), 0n);
+    const tif = "timeInForce" in order ? order.timeInForce.kind : "ioc";
+    if (tif === "fok" && depth < required) {
+      throw new AppError(409, "urn:aqua:error:fok-unfillable", "FOK order does not have full-depth liquidity");
+    }
+    const prepared = await this.protocol.prepareMarketRoute(order, selected, actor.address);
+    return this.ok(command.action, { ...asRecord(prepared), matching: matchingFromBook(order, selected, depth, required) });
   }
 
   private async delegate(command: TradingRequest, actor: AuthenticatedPrincipal, header: string | null): Promise<TradingHttpResult> {
@@ -171,7 +301,7 @@ export class TradingService {
   private async query(query: Extract<TradingRequest, { readonly action: "query" }>["query"], principal: AuthenticatedPrincipal | null): Promise<TradingHttpResult> {
     if (query.resource === "order") return this.ok("query", { order: await this.ownedOrPublicOrder(query.orderId, null) });
     if (query.resource === "orderBook") {
-      const orders = await this.repository.listPairOrders(query.pair.baseToken, query.pair.quoteToken);
+      const orders = await this.pairBook(query.pair.baseToken, query.pair.quoteToken);
       const depth = Math.min(Number(query.depth), 100);
       return this.ok("query", { pair: query.pair, bids: aggregate(orders, "buy", depth), asks: aggregate(orders, "sell", depth) });
     }
@@ -180,7 +310,7 @@ export class TradingService {
       const fills = await this.repository.listPairFills(query.pair.baseToken, query.pair.quoteToken, limit, "cursor" in query ? query.cursor : undefined);
       if (query.resource === "recentTrades") return this.ok("query", fills);
       if (query.resource === "candles") return this.ok("query", { items: candles(fills.items, query.interval), nextCursor: fills.nextCursor });
-      const orders = await this.repository.listPairOrders(query.pair.baseToken, query.pair.quoteToken);
+      const orders = await this.pairBook(query.pair.baseToken, query.pair.quoteToken);
       const bids = aggregate(orders, "buy", 1); const asks = aggregate(orders, "sell", 1);
       const recent = fills.items.filter((fill) => Date.now() - new Date(fill.occurredAt).getTime() <= 86_400_000);
       return this.ok("query", {
@@ -198,6 +328,14 @@ export class TradingService {
     if (query.resource === "fills") return this.ok("query", await this.repository.listFills(actor.address, query.orderId ?? null, Number(query.limit), query.cursor));
     const orders = (await this.repository.listOrders(actor.address, null, 100)).items;
     return this.ok("query", { balances: await this.protocol.queryBalances(query.tokens, actor.address, orders) });
+  }
+
+  private async pairBook(baseToken: Address, quoteToken: Address): Promise<readonly IndexedOrder[]> {
+    const [direct, inverted] = await Promise.all([
+      this.repository.listPairOrders(baseToken, quoteToken),
+      this.repository.listPairOrders(quoteToken, baseToken),
+    ]);
+    return mergePairBooks(direct, inverted, baseToken, quoteToken);
   }
 
   private async ownedOrPublicOrder(id: string, owner: Address | null): Promise<IndexedOrder> {

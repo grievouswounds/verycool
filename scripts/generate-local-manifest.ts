@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { addressSchema, hashSchema, runtimeManifestHash, runtimeManifestSchema } from "@aqua/core";
+import { addressSchema, hashSchema, hexSchema, runtimeManifestHash, runtimeManifestSchema } from "@aqua/core";
 import type { RuntimeManifest } from "@aqua/core";
 import { initializeCubane, JsonRpcClient, keccakHex, hexToBytes } from "@aqua/evm";
 import { z } from "zod";
@@ -135,13 +135,25 @@ if (contract("permit2").address !== canonicalPermit2 || contract("x402ExactPermi
 for (const routerName of ["aquaSwapRouter", "limitSwapRouter"] as const) {
   const router = contract(routerName).address;
   if (await callAddress(router, "AQUA()") !== contract("aqua").address) throw new Error(`${routerName} has the wrong Aqua binding`);
-  if (await callAddress(router, "WETH()") !== contract("wrappedNativeToken").address) throw new Error(`${routerName} has the wrong WETH binding`);
   if (!await callAllowed(contract("boundedMatcher").address, router, "0xf4d2d412")) throw new Error(`Bounded matcher does not allow ${routerName}.swap`);
+}
+if (!await callAllowed(contract("boundedMatcher").address, contract("intentController").address, "0x5f330b0f")) {
+  throw new Error("Bounded matcher does not allow intentController.activate");
+}
+if (!await callAllowed(contract("boundedMatcher").address, contract("orderVaultFactory").address, "0x95d5857e")) {
+  throw new Error("Bounded matcher does not allow orderVaultFactory.execute");
 }
 const keeper = await callAddress(contract("intentController").address, "operator()");
 if (keeper !== input.keeperAddress) throw new Error("Intent controller operator does not match the broker keeper");
 if (await callAddress(contract("boundedMatcher").address, "operator()") !== keeper) throw new Error("Intent controller and bounded matcher operators differ");
 if (await callAddress(canonicalX402, "PERMIT2()") !== canonicalPermit2) throw new Error("x402 exact proxy has the wrong Permit2 binding");
+const typeHash = keccakHex(new TextEncoder().encode("EIP712Domain(string name,uint256 chainId,address verifyingContract)"));
+const nameHash = keccakHex(new TextEncoder().encode("Permit2"));
+const word = (value: string): string => value.replace(/^0x/u, "").padStart(64, "0");
+const expectedPermit2Separator = keccakHex(hexToBytes(hexSchema.parse(`0x${word(typeHash)}${word(nameHash)}${word("0x7a69")}${word(canonicalPermit2)}`)));
+if ((await ethCall(canonicalPermit2, selector("DOMAIN_SEPARATOR()"))).toLowerCase() !== expectedPermit2Separator) {
+  throw new Error("Permit2 DOMAIN_SEPARATOR does not match canonical Permit2 on Anvil");
+}
 const expectedTokens = [
   { symbol: "aUSD", decimals: 6, supply: 1_000_000_000_000n },
   { symbol: "aETH", decimals: 18, supply: 1_000_000_000_000_000_000_000n },
@@ -174,7 +186,7 @@ const base = {
   indexer: { contracts: [contract("aqua").address, contract("aquaSwapRouter").address, contract("intentController").address], startBlock: deploymentBlock.toString(10), confirmations: 1 },
   keeper: {
     allowedTargets: [contract("intentController").address, contract("orderVaultFactory").address, contract("boundedMatcher").address],
-    allowedSelectors: ["0xb1b0923a", "0x5f330b0f", "0x3acc266e", "0xc8d18a45"],
+    allowedSelectors: ["0xb1b0923a", "0x5f330b0f", "0x95d5857e", "0xc8d18a45", "0xeeabec06", "0xf15d634f"],
   },
   secrets: { agent: "broker://agent", facilitator: "broker://facilitator", keeper: "broker://keeper", paseto: "broker://paseto" },
 };

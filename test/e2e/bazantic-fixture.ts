@@ -10,6 +10,7 @@ const tools = [
   ["requestTrade", ["sellToken", "buyToken", "amount"]],
   ["postTrade", ["previewId", "previewHash"]],
   ["getTrades", []],
+  ["cancelTrade", ["tradeId"]],
   ["subscribeToUser", ["address"]],
   ["unsubscribeFromUser", ["address"]],
   ["wipeSubscribedTrades", ["scope"]],

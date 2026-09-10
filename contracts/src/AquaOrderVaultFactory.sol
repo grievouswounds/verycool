@@ -9,7 +9,7 @@ contract AquaOrderVaultFactory {
         "Delegation(address owner,address delegate,address token,uint256 maxPerOrder,uint256 maxPerDay,uint256 validUntil,uint256 nonce)"
     );
     bytes32 public constant ACTION_TYPEHASH = keccak256(
-        "VaultAction(address vault,uint8 action,bytes32 strategyHash,bytes32 tokensHash,bytes32 amountsHash,uint256 nonce,uint256 deadline)"
+        "VaultAction(address vault,uint8 action,bytes32 strategyHash,bytes32 tokensHash,bytes32 amountsHash,bytes32 nonce,uint256 deadline)"
     );
     bytes32 public immutable DOMAIN_SEPARATOR;
 
@@ -21,11 +21,12 @@ contract AquaOrderVaultFactory {
         bytes strategy;
         address[] tokens;
         uint256[] amounts;
+        bytes32 nonce;
         uint256 deadline;
     }
 
     mapping(address owner => uint256 nonce) public delegationNonces;
-    mapping(address delegate => uint256 nonce) public actionNonces;
+    mapping(address delegate => mapping(bytes32 nonce => bool used)) public actionNonceUsed;
     mapping(bytes32 policyKey => Policy policy) public policies;
     mapping(bytes32 policyKey => DailySpend spend) public dailySpend;
     mapping(address vault => bool registered) public vaults;
@@ -35,11 +36,12 @@ contract AquaOrderVaultFactory {
     error PolicyExceeded();
     error Expired();
     error InvalidAction();
+    error Replay();
 
     event DelegationRegistered(address indexed owner, address indexed delegate, address indexed token, uint256 validUntil);
     event DelegationRevoked(address indexed owner, address indexed delegate, address indexed token);
     event VaultDeployed(address indexed vault, address indexed owner, address indexed delegate, address token, bytes32 salt);
-    event ActionExecuted(address indexed vault, uint8 indexed action, uint256 nonce);
+    event ActionExecuted(address indexed vault, uint8 indexed action, bytes32 nonce);
 
     constructor() {
         DOMAIN_SEPARATOR = keccak256(abi.encode(
@@ -65,7 +67,11 @@ contract AquaOrderVaultFactory {
         // `_recover` only calls `ecrecover`, a precompile with no code of its own, so it
         // cannot reenter and reorder the state write or event below.
         if (_recover(_digest(structHash), signature) != owner) revert Unauthorized();
-        policies[_policyKey(owner, delegate, token)] = Policy(maxPerOrder, maxPerDay, validUntil, true);
+        bytes32 key = _policyKey(owner, delegate, token);
+        policies[key] = Policy(maxPerOrder, maxPerDay, validUntil, true);
+        // A newly signed policy is a fresh daily budget. Leaving the previous spend
+        // in place made re-registration a no-op against on-chain PolicyExceeded.
+        dailySpend[key] = DailySpend(0, 0);
         // forge-lint: disable-next-line(reentrancy-events)
         emit DelegationRegistered(owner, delegate, token, validUntil);
     }
@@ -104,26 +110,27 @@ contract AquaOrderVaultFactory {
         return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initHash)))));
     }
 
-    /// @dev request.action 0 activates, 1 amends, 2 cancels, and 3 performs one reviewed market swap.
+    /// @dev request.action 0 activates, 1 amends, 2 cancels, 3 performs one reviewed market swap,
+    /// and 4 returns vault funds to the Ledger owner.
     function execute(LifecycleRequest calldata request, bytes calldata signature) external {
         if (!vaults[address(request.vault)]) revert InvalidAction();
         // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > request.deadline) revert Expired();
+        if (request.nonce == bytes32(0)) revert InvalidAction();
         address delegate = request.vault.delegate();
-        uint256 nonce = actionNonces[delegate]++;
+        if (actionNonceUsed[delegate][request.nonce]) revert Replay();
         bytes32 structHash = keccak256(abi.encode(
             ACTION_TYPEHASH, address(request.vault), request.action, keccak256(request.strategy),
-            keccak256(abi.encode(request.tokens)), keccak256(abi.encode(request.amounts)), nonce, request.deadline
+            keccak256(abi.encode(request.tokens)), keccak256(abi.encode(request.amounts)), request.nonce, request.deadline
         ));
         // `_recover` only calls `ecrecover`, a precompile with no code of its own, so it cannot
-        // reenter and reorder the state or event below. `nonce` and `request.action` are
-        // already final at this point, so the event can safely be emitted before the vault
-        // calls further down without changing what it reports; if any branch reverts
-        // (including the invalid-action case) the emitted log is discarded along with the rest
-        // of the transaction, exactly as if it were emitted afterwards.
+        // reenter and reorder the state or event below. The nonce is marked used before the vault
+        // calls further down; if any branch reverts (including the invalid-action case) the
+        // nonce write and emitted log are discarded along with the rest of the transaction.
         if (_recover(_digest(structHash), signature) != delegate) revert Unauthorized();
+        actionNonceUsed[delegate][request.nonce] = true;
         // forge-lint: disable-next-line(reentrancy-events)
-        emit ActionExecuted(address(request.vault), request.action, nonce);
+        emit ActionExecuted(address(request.vault), request.action, request.nonce);
         if (request.action == 0 || request.action == 1) {
             if (request.amounts.length != 2) revert InvalidAction();
             uint256 oldAmount = request.vault.committedAmount();
@@ -138,6 +145,8 @@ contract AquaOrderVaultFactory {
             if (request.amounts.length != 2) revert InvalidAction();
             _charge(request.vault.owner(), delegate, request.vault.sellToken(), request.amounts[1], request.amounts[1]);
             request.vault.executeSwap(request.strategy, request.tokens, request.amounts);
+        } else if (request.action == 4) {
+            request.vault.returnToOwner(request.tokens);
         } else {
             revert InvalidAction();
         }

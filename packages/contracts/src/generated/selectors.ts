@@ -14,4 +14,8 @@ export const selectors = {
   "dock(address,bytes32,address[])": "0x28defc17",
   "delegationNonces(address)": "0x03c8a3c6",
   "registerDelegation(address,address,address,uint128,uint128,uint64,bytes)": "0xeeabec06",
+  "deployVault(address,address,address,address,address,bytes32)": "0xf15d634f",
+  "actionNonceUsed(address,bytes32)": "0xa8b2c3b7",
+  "execute(address[],bytes[])": "0xc8d18a45",
+  "execute((address,uint8,bytes,address[],uint256[],bytes32,uint256),bytes)": "0x95d5857e",
 } as const;

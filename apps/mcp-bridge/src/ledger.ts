@@ -20,8 +20,39 @@ export const signLedgerMessage = async (expectedOwner: Address, message: string)
   if (result.owner !== expectedOwner) throw new Error("Connected Ledger account does not match the authenticated owner");
   return joinLedgerSignature(result.signature);
 };
+const jsonable = (value: unknown): unknown => {
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Uint8Array) return `0x${Buffer.from(value).toString("hex")}`;
+  if (Array.isArray(value)) return value.map(jsonable);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jsonable(item)]));
+  return value;
+};
+const scalarHex = (item: unknown): string | undefined => {
+  if (typeof item === "string") return item;
+  if (typeof item === "bigint") return `0x${item.toString(16)}`;
+  if (item instanceof Uint8Array) return `0x${Buffer.from(item).toString("hex")}`;
+  return undefined;
+};
+const asSignature = (value: unknown): unknown => {
+  const parsed = z.object({
+    owner: z.unknown(),
+    signature: z.object({ r: z.unknown(), s: z.unknown(), v: z.unknown() }).loose(),
+  }).loose().safeParse(value);
+  if (!parsed.success) return jsonable(value);
+  const v = parsed.data.signature.v;
+  return {
+    owner: parsed.data.owner,
+    signature: {
+      r: scalarHex(parsed.data.signature.r),
+      s: scalarHex(parsed.data.signature.s),
+      v: typeof v === "bigint" ? Number(v) : v,
+    },
+  };
+};
 export const signLedgerTypedData = async (expectedOwner: Address, typedData: Readonly<Record<string, unknown>>): Promise<Hex> => {
-  const result = signedSchema.parse(await ledgerSignTypedData(typedData));
-  if (result.owner !== expectedOwner) throw new Error("Connected Ledger account does not match the authenticated owner");
-  return joinLedgerSignature(result.signature);
+  const raw = await ledgerSignTypedData(typedData);
+  const parsed = signedSchema.safeParse(asSignature(raw));
+  if (!parsed.success) throw new Error(`Ledger typed-data signature is malformed: ${JSON.stringify(jsonable(raw))}`);
+  if (parsed.data.owner !== expectedOwner) throw new Error("Connected Ledger account does not match the authenticated owner");
+  return joinLedgerSignature(parsed.data.signature);
 };

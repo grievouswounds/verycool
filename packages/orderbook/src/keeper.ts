@@ -12,6 +12,7 @@ export interface KeeperJobRepository {
   markSubmitted(id: string, worker: string, transactionHash: Hash, nonce: bigint, maxFeePerGas: bigint, submittedAt: Date): Promise<void>;
   markComplete(id: string, worker: string, blockNumber: bigint): Promise<void>;
   markFailed(id: string, worker: string, reason: string): Promise<void>;
+  release(id: string, worker: string): Promise<void>;
 }
 export interface KeeperTransactionSigner { readonly address: Address; sign(transaction: Eip1559Transaction): Hex | Promise<Hex> }
 export interface KeeperConfiguration {
@@ -55,7 +56,10 @@ export class Keeper {
       const transactionHash = await this.rpc.sendRawTransaction(raw);
       await this.repository.markSubmitted(job.id, worker, transactionHash, nonce, maxFeePerGas, now);
     } catch (error: unknown) {
-      await this.repository.markFailed(job.id, worker, error instanceof Error ? error.message : "Unknown keeper failure");
+      const message = error instanceof Error ? error.message : "Unknown keeper failure";
+      const retryable = job.attempts < 10 && !/allowlisted|cannot transfer native|fee ceiling|gas ceiling/u.test(message);
+      if (retryable) await this.repository.release(job.id, worker);
+      else await this.repository.markFailed(job.id, worker, message);
     }
   }
 

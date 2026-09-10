@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "./json-bigint.mjs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { addressSchema, hexSchema } from "@aqua/core";

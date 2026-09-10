@@ -248,9 +248,18 @@ export const encodeDelegationPreimage = (value: { readonly chainId: number; read
 
 export const encodeDelegationNonce = (owner: Address): Hex => encodeCall("delegationNonces(address)", Abi.Tuple.create(Abi.Address).fromOrThrow([addressToBigInt(owner)]).encodeOrThrow());
 
-export const encodeActionNonce = (delegate: Address): Hex => encodeCall(
-  "actionNonces(address)", Abi.Tuple.create(Abi.Address).fromOrThrow([addressToBigInt(delegate)]).encodeOrThrow(),
+export const encodeActionNonceUsed = (delegate: Address, nonce: Hash): Hex => encodeCall(
+  "actionNonceUsed(address,bytes32)", Abi.Tuple.create(Abi.Address, Abi.Bytes32).fromOrThrow([addressToBigInt(delegate), hexToBytes(nonce)]).encodeOrThrow(),
 );
+
+export const mappingStorageSlot = (key: Address | Hash, slot: bigint): Hash => {
+  const encoded = Abi.Tuple.create(Abi.Bytes32, Abi.Uint256).fromOrThrow([hexToBytes(hashSchema.parse(`0x${key.slice(2).padStart(64, "0")}`)), slot]).encodeOrThrow();
+  return keccakHex(hexToBytes(hexSchema.parse(`0x${encoded}`)));
+};
+
+export const erc20BalanceSlot = (account: Address, mappingSlot: bigint): Hash => mappingStorageSlot(account, mappingSlot);
+
+export const uint256SlotValue = (value: bigint): Hash => hashSchema.parse(`0x${value.toString(16).padStart(64, "0")}`);
 
 export interface VaultDeployment {
   readonly owner: Address;
@@ -274,24 +283,31 @@ export const encodeDeployVault = (value: VaultDeployment): Hex => encodeVaultDep
 
 export interface VaultAction {
   readonly vault: Address;
-  readonly action: 0 | 1 | 2 | 3;
+  readonly action: 0 | 1 | 2 | 3 | 4;
   readonly strategy: Hex;
   readonly tokens: readonly Address[];
   readonly amounts: readonly bigint[];
-  readonly nonce: bigint;
+  readonly nonce: Hash;
   readonly deadline: bigint;
 }
 
 const vaultRequestFactory = Abi.Tuple.create(
-  Abi.Address, Abi.Uint8, Abi.Bytes, Abi.Vector.create(Abi.Address), Abi.Vector.create(Abi.Uint256), Abi.Uint256,
+  Abi.Address, Abi.Uint8, Abi.Bytes, Abi.Vector.create(Abi.Address), Abi.Vector.create(Abi.Uint256), Abi.Bytes32, Abi.Uint256,
 );
 
 export const encodeExecuteVaultAction = (value: VaultAction, signature: Hex): Hex => encodeCall(
-  "execute((address,uint8,bytes,address[],uint256[],uint256),bytes)",
+  "execute((address,uint8,bytes,address[],uint256[],bytes32,uint256),bytes)",
   Abi.Tuple.create(vaultRequestFactory, Abi.Bytes).fromOrThrow([[
     addressToBigInt(value.vault), value.action, hexToBytes(value.strategy), value.tokens.map(addressToBigInt),
-    value.amounts, value.deadline,
+    value.amounts, hexToBytes(value.nonce), value.deadline,
   ], hexToBytes(signature)]).encodeOrThrow(),
+);
+
+export const encodeBoundedMatcherExecute = (targets: readonly Address[], calls: readonly Hex[]): Hex => encodeCall(
+  "execute(address[],bytes[])",
+  Abi.Tuple.create(Abi.Vector.create(Abi.Address), Abi.Vector.create(Abi.Bytes)).fromOrThrow([
+    targets.map(addressToBigInt), calls.map(hexToBytes),
+  ]).encodeOrThrow(),
 );
 
 export const hashAddressArray = (values: readonly Address[]): Hash => {

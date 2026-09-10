@@ -164,17 +164,24 @@ const prepareSwapSchema = z.object({
     context.addIssue({ code: "custom", message: "Provide deadline or lifetimeSeconds, not both", path: ["deadline"] });
   }
 });
+const gtdTimeInForceSchema = z.object({
+  kind: z.literal("gtd"),
+  expiresAt: z.iso.datetime({ offset: true }).optional(),
+  lifetimeSeconds: lifetimeSchema.optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.expiresAt === undefined) === (value.lifetimeSeconds === undefined)) {
+    context.addIssue({ code: "custom", message: "GTD requires exactly one of expiresAt or lifetimeSeconds" });
+  }
+});
 const timeInForceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("gtc") }).strict(),
-  z.object({ kind: z.literal("gtd"), expiresAt: z.iso.datetime({ offset: true }) }).strict(),
-  z.object({ kind: z.literal("gtd"), lifetimeSeconds: lifetimeSchema }).strict(),
+  gtdTimeInForceSchema,
   z.object({ kind: z.literal("ioc") }).strict(),
   z.object({ kind: z.literal("fok") }).strict(),
 ]);
 const restingTimeInForceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("gtc") }).strict(),
-  z.object({ kind: z.literal("gtd"), expiresAt: z.iso.datetime({ offset: true }) }).strict(),
-  z.object({ kind: z.literal("gtd"), lifetimeSeconds: lifetimeSchema }).strict(),
+  gtdTimeInForceSchema,
 ]);
 const commonOrderShape = { pair: pairSchema, side: sideSchema, size: sizeSchema } as const;
 const marketOrderSchema = z.object({
@@ -215,7 +222,7 @@ const triggerLimitSchema = z.object({
 const trailingStopSchema = z.object({
   kind: z.literal("trailingStop"), ...commonOrderShape,
   trail: z.discriminatedUnion("unit", [
-    z.object({ unit: z.literal("bps"), value: bpsSchema.refine((value) => BigInt(value) > 0n) }).strict(),
+    z.object({ unit: z.literal("bps"), value: bpsSchema.refine((value) => BigInt(value) > 0n, "Trail must be greater than zero") }).strict(),
     z.object({ unit: z.literal("quote"), value: positiveDecimalSchema }).strict(),
   ]),
   activationPrice: positiveDecimalSchema.optional(),

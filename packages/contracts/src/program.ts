@@ -2,14 +2,23 @@ import { hexSchema, validationError } from "@aqua/core";
 import type { Address, Hex } from "@aqua/core";
 import { bytesToHex, concatHex, hexToBytes } from "@aqua/evm";
 
-const LIMIT_OPCODES = {
-  deadline: 14,
-  staticBalances: 18,
-  invalidateBit: 19,
-  invalidateTokenOut: 21,
-  limitSwap: 22,
-  limitSwapOnlyFull: 23,
-  salt: 31,
+/**
+ * LimitOpcodes._opcodes() overlays length 41 over static slot 0, so dynamic[i] = static[i+1].
+ * VM.runLoop dispatches opcodes[opcode] (not opcode-1). Official ProgramBuilder.findOpcode
+ * returns that dynamic index, so opcode n runs static[n+1]:
+ * _deadline 14 → 13, _staticBalancesXD 18 → 17, _invalidateBit1D 19 → 18,
+ * _invalidateTokenOut1D 21 → 20, _limitSwap1D 22 → 21, _limitSwapOnlyFull1D 23 → 22, _salt 31 → 30.
+ * _jump 11 → 10. Aqua preloads strategy balances, so programs jump over `_staticBalancesXD`.
+ */
+export const LIMIT_OPCODES = {
+  jump: 10,
+  deadline: 13,
+  staticBalances: 17,
+  invalidateBit: 18,
+  invalidateTokenOut: 20,
+  limitSwap: 21,
+  limitSwapOnlyFull: 22,
+  salt: 30,
 } as const;
 
 const unsignedBytes = (value: bigint, length: number): Uint8Array => {
@@ -55,12 +64,17 @@ export const buildLimitProgram = (input: LimitProgramInput): Hex => {
     input.fill.type === "partial" ? LIMIT_OPCODES.limitSwap : LIMIT_OPCODES.limitSwapOnlyFull,
     Uint8Array.from([direction]),
   );
+  const deadlineIx = instruction(LIMIT_OPCODES.deadline, unsignedBytes(input.expiresAtSeconds, 5));
+  const saltIx = instruction(LIMIT_OPCODES.salt, hexToBytes(input.salt));
+  const balancesIx = instruction(LIMIT_OPCODES.staticBalances, balances);
+  // Aqua quote/swap preload safeBalances into the VM registers, so executing
+  // _staticBalancesXD would revert SetBalancesExpectZeroBalances. Jump over it;
+  // the instruction remains in the bytecode so the indexer can still read the rate.
+  const skipTo = hexToBytes(concatHex(deadlineIx, saltIx)).length + 4 + hexToBytes(balancesIx).length;
+  if (skipTo > 0xffff) throw validationError("Limit program exceeds jump range");
   return concatHex(
-    instruction(LIMIT_OPCODES.deadline, unsignedBytes(input.expiresAtSeconds, 5)),
-    instruction(LIMIT_OPCODES.salt, hexToBytes(input.salt)),
-    instruction(LIMIT_OPCODES.staticBalances, balances),
-    invalidator,
-    limit,
+    deadlineIx, saltIx, instruction(LIMIT_OPCODES.jump, unsignedBytes(BigInt(skipTo), 2)),
+    balancesIx, invalidator, limit,
   );
 };
 

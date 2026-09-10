@@ -6,6 +6,9 @@ const signatures = [
   "swap((address,uint256,bytes),address,address,uint256,bytes)", "ship(address,bytes,address[],uint256[])",
   "dock(address,bytes32,address[])",
   "delegationNonces(address)", "registerDelegation(address,address,address,uint128,uint128,uint64,bytes)",
+  "deployVault(address,address,address,address,address,bytes32)",
+  "actionNonceUsed(address,bytes32)", "execute(address[],bytes[])",
+  "execute((address,uint8,bytes,address[],uint256[],bytes32,uint256),bytes)",
 ] as const;
 
 const rows = signatures.map((signature) => `  ${JSON.stringify(signature)}: ${JSON.stringify(selector(signature))},`).join("\n");

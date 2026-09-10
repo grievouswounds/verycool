@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { addressSchema, hashSchema, hexSchema, quantitySchema, upstreamError } from "@aqua/core";
-import type { Address, Hash, Hex, RpcBlock, RpcCall, RpcLog, RpcLogFilter, RpcPort, RpcReceipt } from "@aqua/core";
+import type { Address, Hash, Hex, RpcBlock, RpcCall, RpcLog, RpcLogFilter, RpcPort, RpcReceipt, RpcStateOverrides } from "@aqua/core";
 import { selector } from "./hex.ts";
 import { decodeString, decodeUint256 } from "./abi.ts";
 import { hexToQuantity, quantityToHex } from "./hex.ts";
@@ -63,7 +63,11 @@ export class JsonRpcClient implements RpcPort {
     try { body = JSON.parse(text) as unknown; }
     catch { throw upstreamError("RPC response is not valid JSON"); }
     const failed = rpcFailureSchema.safeParse(body);
-    if (failed.success) throw upstreamError(`RPC ${String(failed.data.error.code)}: ${failed.data.error.message}`);
+    if (failed.success) {
+      const data = failed.data.error.data;
+      const detail = typeof data === "string" && data.length > 0 ? ` data=${data}` : "";
+      throw upstreamError(`RPC ${String(failed.data.error.code)}: ${failed.data.error.message}${detail}`);
+    }
     const parsed = rpcSuccessSchema.safeParse(body);
     if (!parsed.success || parsed.data.id !== id) throw upstreamError("Malformed or mismatched RPC response");
     return parsed.data.result;
@@ -80,12 +84,16 @@ export class JsonRpcClient implements RpcPort {
     return hexSchema.parse(await this.request("eth_getCode", [address, "latest"]));
   }
 
-  public async call(transaction: RpcCall): Promise<Hex> {
-    return hexSchema.parse(await this.request("eth_call", [this.toRpcTransaction(transaction), "latest"]));
+  public async call(transaction: RpcCall, overrides?: RpcStateOverrides): Promise<Hex> {
+    const params: unknown[] = [this.toRpcTransaction(transaction), "latest"];
+    if (overrides !== undefined) params.push(this.toRpcOverrides(overrides));
+    return hexSchema.parse(await this.request("eth_call", params));
   }
 
-  public async estimateGas(transaction: RpcCall): Promise<bigint> {
-    return hexToQuantity(quantitySchema.parse(await this.request("eth_estimateGas", [this.toRpcTransaction(transaction)])));
+  public async estimateGas(transaction: RpcCall, overrides?: RpcStateOverrides): Promise<bigint> {
+    const params: unknown[] = [this.toRpcTransaction(transaction)];
+    if (overrides !== undefined) params.push("latest", this.toRpcOverrides(overrides));
+    return hexToQuantity(quantitySchema.parse(await this.request("eth_estimateGas", params)));
   }
 
   public async tokenDecimals(address: Address): Promise<number> {
@@ -167,6 +175,17 @@ export class JsonRpcClient implements RpcPort {
     if (transaction.from !== undefined) value["from"] = transaction.from;
     if (transaction.value !== undefined) value["value"] = transaction.value;
     return value;
+  }
+
+  private toRpcOverrides(overrides: RpcStateOverrides): Readonly<Record<string, unknown>> {
+    return Object.fromEntries(Object.entries(overrides).map(([address, override]) => {
+      const body: Record<string, unknown> = {};
+      if (override.balance !== undefined) body["balance"] = override.balance;
+      if (override.nonce !== undefined) body["nonce"] = override.nonce;
+      if (override.code !== undefined) body["code"] = override.code;
+      if (override.stateDiff !== undefined) body["stateDiff"] = override.stateDiff;
+      return [address, body];
+    }));
   }
 }
 

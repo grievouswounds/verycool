@@ -7,7 +7,7 @@
     flake = false;
   };
   inputs.swapvm = {
-    url = "github:1inch/swap-vm/f09a41e689240adc645934f965c8061749397cd2";
+    url = "github:1inch/swap-vm/32c687c2b73101fc26549e48fa1ff8a4d73afbac";
     flake = false;
   };
   inputs.x402 = {
@@ -621,6 +621,16 @@
             ];
             text = ''exec bash "$PWD/scripts/e2e.sh" all "$@"'';
           };
+          e2ePhysical = pkgs.writeShellApplication {
+            name = "e2e-physical";
+            runtimeInputs = [
+              pkgs.bash
+              pkgs.coreutils
+              pkgs.git
+              pkgs.nix
+            ];
+            text = ''exec bash "$PWD/scripts/e2e.sh" physical "$@"'';
+          };
         in
         {
           default = api;
@@ -637,6 +647,7 @@
             e2e
             e2eBazanticCanary
             e2eAll
+            e2ePhysical
             ;
           order-worker = orderWorker;
         }
@@ -720,6 +731,10 @@
             type = "app";
             program = "${packages.e2eAll}/bin/e2e-all";
           };
+          e2e-physical = {
+            type = "app";
+            program = "${packages.e2ePhysical}/bin/e2e-physical";
+          };
         }
       );
 
@@ -769,6 +784,7 @@
               self.packages.${system}.e2e
               self.packages.${system}.e2eBazanticCanary
               self.packages.${system}.e2eAll
+              self.packages.${system}.e2ePhysical
               pkgs.bun
               # Build-time only: node-hid and usb may invoke node-gyp/prebuild-install.
               pkgs.nodejs
@@ -799,11 +815,11 @@
               export X402_UPSTREAM=${x402}
               export PERMIT2_UPSTREAM=${permit2}
               export AQUA_SPECULOS_SOURCE=${speculos-src}
+              export AQUA_PYTHON=${pkgs.python3.withPackages (ps: [ ps.fido2 ])}/bin/python3
                 ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export AQUA_SPECULOS_BIN=${self.packages.${system}.speculos}/bin/speculos
                   export AQUA_LEDGER_E2E_ASSETS=${self.packages.${system}.ledger-e2e-assets}
                   export AQUA_LEDGER_SECURITY_KEY_SOURCE=${ledger-security-key}
-                  export AQUA_PYTHON=${pkgs.python3.withPackages (ps: [ ps.fido2 ])}/bin/python3
                 ''}
               export AQUA_STATE_DIR="''${AQUA_STATE_DIR:-$PWD/.data}"
               export DATABASE_URL="''${DATABASE_URL:-postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend}"

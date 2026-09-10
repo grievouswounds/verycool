@@ -1,4 +1,4 @@
-import { formatTokenAmount, hexSchema, parseTokenAmount, positiveAmountSchema, validationError } from "@aqua/core";
+import { AppError, formatTokenAmount, hexSchema, parseTokenAmount, positiveAmountSchema, validationError } from "@aqua/core";
 import type {
   Address, AuthenticatedPrincipal, DirectSwapRequest, Hash, Hex,
   LimitOrderCancellation, LimitOrderRequest, NativeAmount, Quote, RpcPort, UnsignedTransaction,
@@ -7,7 +7,7 @@ import {
   decodeOrder, decodeQuoteResult, decodeUint256, encodeAllowance, encodeApprove, encodeDock,
   encodeOrder, encodeShip, encodeSwapVmCall, encodeWithdraw, orderHash, quantityToHex, selector,
 } from "@aqua/evm";
-import type { SwapVmOrder } from "@aqua/evm";
+import type { QuoteResult, SwapVmOrder } from "@aqua/evm";
 import { AQUA_MAKER_TRAITS, encodeTakerTraits } from "./traits.ts";
 import { assertAllowedProgram, buildLimitProgram, decodeProgram } from "./program.ts";
 
@@ -71,6 +71,11 @@ const tx = (
   ...(gas === undefined ? {} : { gas: quantityToHex(gas) }),
 });
 
+const quotedAmount = (value: bigint, decimals: number, label: string) => {
+  const formatted = formatTokenAmount(value, decimals);
+  if (!/[1-9]/u.test(formatted)) throw new AppError(409, "urn:aqua:error:no-liquidity", `SwapVM quote returned a non-positive ${label}`);
+  return positiveAmountSchema.parse(formatted);
+};
 const seconds = (iso: string): bigint => BigInt(Math.floor(new Date(iso).getTime() / 1_000));
 const MAX_UINT40 = (1n << 40n) - 1n;
 
@@ -124,7 +129,13 @@ export class ProtocolService {
       threshold: 0n, taker, deadlineSeconds: deadline, ...recipient,
     });
     const quoteData = encodeSwapVmCall("quote", order, input.tokenIn, input.tokenOut, requested, quoteTraits);
-    const quoted = decodeQuoteResult(await this.rpc.call({ from: taker, to: router, data: quoteData }));
+    let quoted: QuoteResult;
+    try {
+      quoted = decodeQuoteResult(await this.rpc.call({ from: taker, to: router, data: quoteData }));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "quote reverted";
+      throw new AppError(502, "urn:aqua:error:upstream", `SwapVM quote reverted: ${message}`);
+    }
     return { deadline, exactIn, order, quoted, recipient, requested, router, tokenInDecimals, tokenOutDecimals };
   }
 
@@ -134,8 +145,8 @@ export class ProtocolService {
       chainId: this.config.chainId,
       orderHash: context.quoted.orderHash,
       quote: {
-        amountIn: positiveAmountSchema.parse(formatTokenAmount(context.quoted.amountIn, context.tokenInDecimals)),
-        amountOut: positiveAmountSchema.parse(formatTokenAmount(context.quoted.amountOut, context.tokenOutDecimals)),
+        amountIn: quotedAmount(context.quoted.amountIn, context.tokenInDecimals, "amountIn"),
+        amountOut: quotedAmount(context.quoted.amountOut, context.tokenOutDecimals, "amountOut"),
         orderHash: context.quoted.orderHash,
       },
       tokenDecimals: { tokenIn: context.tokenInDecimals, tokenOut: context.tokenOutDecimals },
@@ -173,8 +184,8 @@ export class ProtocolService {
     return {
       chainId: this.config.chainId, orderHash: context.quoted.orderHash,
       quote: {
-        amountIn: positiveAmountSchema.parse(formatTokenAmount(context.quoted.amountIn, context.tokenInDecimals)),
-        amountOut: positiveAmountSchema.parse(formatTokenAmount(context.quoted.amountOut, context.tokenOutDecimals)),
+        amountIn: quotedAmount(context.quoted.amountIn, context.tokenInDecimals, "amountIn"),
+        amountOut: quotedAmount(context.quoted.amountOut, context.tokenOutDecimals, "amountOut"),
         orderHash: context.quoted.orderHash,
       },
       transaction: tx(this.config, principal.address, context.router, data, value, gas),
@@ -212,7 +223,7 @@ export class ProtocolService {
     const encodedOrder = encodeOrder(order);
     const hash = orderHash(order);
     const tokens: readonly [Address, Address] = [input.buyToken, input.sellToken];
-    const amounts: readonly [bigint, bigint] = [0n, sellAmount];
+    const amounts: readonly [bigint, bigint] = [buyAmount, sellAmount];
     const allowance = decodeUint256(await this.rpc.call({
       from: principal.address, to: input.sellToken, data: encodeAllowance(principal.address, this.config.aqua),
     }));

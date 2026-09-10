@@ -3,7 +3,7 @@ import { HTTPFacilitatorClient } from "@x402/core/http";
 import { decodePaymentSignatureHeader } from "@x402/core/http";
 import type { PaymentRequired, SettleResponse } from "@x402/core/types";
 import {
-  addressSchema, AppError, hashSchema, hexSchema, parseTokenAmount, positiveAmountSchema, quantitySchema,
+  addressSchema, AppError, hashSchema, hexSchema, parseStrictJson, parseTokenAmount, positiveAmountSchema, quantitySchema,
 } from "@aqua/core";
 import type {
   Address, AuthenticatedPrincipal, Hash, Hex, RpcCall, RpcPort, RuntimeManifest, SubscribedTradesWipe,
@@ -11,7 +11,7 @@ import type {
 } from "@aqua/core";
 import { tradingOrderSchema } from "@aqua/core";
 import {
-  decodeAddress, decodeUint256, encodeActionNonce, encodeAllowance, encodeApprove, encodeBalanceOf, encodeDelegationNonce,
+  decodeAddress, decodeUint256, encodeAllowance, encodeApprove, encodeBalanceOf, encodeDelegationNonce,
   encodeDeployVault, encodeExecuteVaultAction, encodePredictVault, encodeRegisterDelegation, hashAddressArray,
   hashUint256Array, hexToBytes, keccakHex, quantityToHex, recoverAgentBindingAddress, recoverDelegationAddress,
   recoverTypedDataAddress,
@@ -21,6 +21,32 @@ import type { TradingService } from "@aqua/orderbook";
 import type { QuoterService, TokenSearchResult } from "@aqua/quoter";
 import { exactPermit2UpfrontRequirement, paymentIdentifier } from "@aqua/x402-adapter";
 import { z } from "zod";
+import { simulateFundedCalls } from "./safety.ts";
+
+const explainZod = (error: z.ZodError): string =>
+  error.issues.map((issue) => `${issue.path.map(String).join(".") || "<root>"}: ${issue.message}`).join("; ");
+const describeValue = (value: unknown): string => {
+  if (value === null) return "null";
+  if (typeof value !== "object") return typeof value;
+  if (Array.isArray(value)) {
+    const items: readonly unknown[] = value;
+    return `array(${String(items.length)})`;
+  }
+  const record = z.record(z.string(), z.unknown()).safeParse(value);
+  return record.success ? Object.keys(record.data).join(",") || "<empty-object>" : "object";
+};
+const parseRequired = <T>(schema: z.ZodType<T>, value: unknown, label: string): T => {
+  let unwrapped = value;
+  if (typeof value === "string") {
+    try { unwrapped = parseStrictJson(value); }
+    catch { throw new AppError(422, "urn:aqua:error:plan", `${label}: malformed JSON`); }
+  }
+  const parsed = schema.safeParse(unwrapped);
+  if (parsed.success) return parsed.data;
+  throw new AppError(422, "urn:aqua:error:plan", `${label} (${describeValue(unwrapped)}): ${explainZod(parsed.error)}`);
+};
+const jsonObject = (value: unknown, label: string): Readonly<Record<string, unknown>> =>
+  parseRequired(z.record(z.string(), z.unknown()), value, label);
 
 interface AgentBindingRow { readonly agent: Address }
 interface AgentChallengeRow { readonly owner: Address; readonly agent: Address; readonly message: string; readonly expires_at: Date; readonly used_at: Date | null }
@@ -42,6 +68,48 @@ const canonical = (value: unknown): string => {
 const digest = (value: unknown): Hash => keccakHex(new TextEncoder().encode(canonical(value)));
 const randomHash = (): Hash => hashSchema.parse(`0x${Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("")}`);
 const typedDomain = (manifest: RuntimeManifest) => ({ name: "Aqua Ledger Agent Vault", version: "1", chainId: manifest.chain.id, verifyingContract: manifest.contracts.orderVaultFactory.address });
+const eip712DomainTypes = [
+  { name: "name", type: "string" }, { name: "version", type: "string" },
+  { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" },
+] as const;
+const vaultActionTypes = [
+  { name: "vault", type: "address" }, { name: "action", type: "uint8" }, { name: "strategyHash", type: "bytes32" },
+  { name: "tokensHash", type: "bytes32" }, { name: "amountsHash", type: "bytes32" }, { name: "nonce", type: "bytes32" }, { name: "deadline", type: "uint256" },
+] as const;
+const lifecycleFor = (manifest: RuntimeManifest, action: VaultAction): Eip712TypedData => ({
+  domain: typedDomain(manifest), primaryType: "VaultAction", types: { EIP712Domain: [...eip712DomainTypes], VaultAction: [...vaultActionTypes] },
+  message: {
+    vault: action.vault, action: action.action, strategyHash: keccakHex(hexToBytes(action.strategy)),
+    tokensHash: hashAddressArray(action.tokens), amountsHash: hashUint256Array(action.amounts),
+    nonce: action.nonce, deadline: action.deadline.toString(),
+  },
+});
+const serializeAction = (action: VaultAction): Record<string, unknown> => ({
+  ...action, amounts: action.amounts.map(String), nonce: action.nonce, deadline: action.deadline.toString(),
+});
+const matchingSchema = z.object({
+  outcome: z.enum(["fillsNow", "rests", "unfillable"]), expectedFillPrice: z.string().nullable(),
+  depthConsumedLevels: z.number().int().nonnegative(), depthConsumedBaseUnits: z.string(),
+  unfilledRemainder: z.string().nullable(), fokFeasible: z.boolean().nullable(),
+}).strict();
+const applyBps = (price: string, bps: string, worse: boolean): string => {
+  const [whole = "0", fraction = ""] = price.split(".");
+  const scale = 10n ** BigInt(fraction.length);
+  const value = BigInt(`${whole}${fraction}`);
+  const next = worse ? value * (10_000n - BigInt(bps)) / 10_000n : value * (10_000n + BigInt(bps)) / 10_000n;
+  if (next === 0n) return "0";
+  if (fraction.length === 0) return next.toString();
+  const raw = next.toString().padStart(fraction.length + 1, "0");
+  const trimmed = raw.slice(raw.length - fraction.length).replace(/0+$/u, "");
+  return trimmed.length === 0 ? raw.slice(0, raw.length - fraction.length) : `${raw.slice(0, raw.length - fraction.length)}.${trimmed}`;
+};
+interface VaultPlan {
+  readonly action: VaultAction;
+  readonly legs: readonly { readonly role: string; readonly action: VaultAction; readonly triggerPrice: string | null; readonly trail: unknown; readonly activationPrice: string | null }[];
+  readonly fundingAmount: bigint;
+  readonly kind: "market" | "resting" | "armed";
+  readonly matching: z.infer<typeof matchingSchema> | null;
+}
 
 interface ResolvedToken {
   readonly address: Address; readonly name: string; readonly symbol: string; readonly decimals: number;
@@ -107,18 +175,18 @@ export class TradeApiService {
     if (maxPerOrder >= 1n << 128n || maxPerDay >= 1n << 128n) throw new AppError(422, "urn:aqua:error:delegation-limit", "Delegation limit exceeds uint128");
     const nonce = decodeUint256(await this.rpc.call({ to: this.manifest.contracts.orderVaultFactory.address, data: encodeDelegationNonce(owner) }));
     const id = crypto.randomUUID(); const expiresAt = new Date(Date.now() + 300_000);
-    const typedData = { domain: typedDomain(this.manifest), primaryType: "Delegation", types: { Delegation: [
+    const typedData = { domain: typedDomain(this.manifest), primaryType: "Delegation", types: { EIP712Domain: [...eip712DomainTypes], Delegation: [
       { name: "owner", type: "address" }, { name: "delegate", type: "address" }, { name: "token", type: "address" }, { name: "maxPerOrder", type: "uint256" }, { name: "maxPerDay", type: "uint256" }, { name: "validUntil", type: "uint256" }, { name: "nonce", type: "uint256" },
-    ] }, message: { owner, delegate: input.agent, token: input.token, maxPerOrder: maxPerOrder.toString(), maxPerDay: maxPerDay.toString(), validUntil: String(Math.floor(validUntil.getTime() / 1000)), nonce: nonce.toString() } };
+    ] }, message: { owner, delegate: input.agent, token: input.token, maxPerOrder: maxPerOrder.toString(), maxPerDay: maxPerDay.toString(), validUntil: String(Math.floor(validUntil.getTime() / 1_000)), nonce: nonce.toString() } };
     const previewHash = digest({ id, typedData, expiresAt: expiresAt.toISOString() });
-    await this.db`INSERT INTO delegation_previews(id,preview_hash,owner,agent,token,max_per_order,max_per_day,valid_until,typed_data,expires_at) VALUES(${id},${previewHash},${owner},${input.agent},${input.token},${maxPerOrder.toString()},${maxPerDay.toString()},${validUntil},${JSON.stringify(typedData)},${expiresAt})`;
+    await this.db`INSERT INTO delegation_previews(id,preview_hash,owner,agent,token,max_per_order,max_per_day,valid_until,typed_data,expires_at) VALUES(${id},${previewHash},${owner},${input.agent},${input.token},${maxPerOrder.toString()},${maxPerDay.toString()},${validUntil},${JSON.stringify(typedData)}::jsonb,${expiresAt})`;
     return { previewId: id, previewHash, expiresAt: expiresAt.toISOString(), typedData, normalized: { ...input, maxPerOrderUnits: maxPerOrder.toString(), maxPerDayUnits: maxPerDay.toString() } };
   }
 
   public async submitDelegation(owner: Address, input: { readonly previewId: string; readonly previewHash: Hash; readonly ownerSignature: Hex }) {
     const rows = await this.db<DelegationPreviewRow[]>`SELECT id,preview_hash,owner,agent,token,max_per_order::text,max_per_day::text,valid_until,typed_data,expires_at,used_at FROM delegation_previews WHERE id=${input.previewId}`;
     const preview = rows[0]; if (preview?.owner !== owner || preview.preview_hash !== input.previewHash || preview.used_at !== null || preview.expires_at <= new Date()) throw new AppError(409, "urn:aqua:error:delegation-preview", "Delegation preview is missing, altered, expired, or already used");
-    const message = z.object({ message: z.object({ nonce: z.string().regex(/^\d+$/u) }).loose() }).loose().parse(preview.typed_data).message;
+    const message = z.object({ message: z.object({ nonce: z.string().regex(/^\d+$/u) }).loose() }).loose().parse(jsonObject(preview.typed_data, "Delegation typed data")).message;
     const value = { chainId: this.manifest.chain.id, verifyingContract: this.manifest.contracts.orderVaultFactory.address, owner, delegate: preview.agent, token: preview.token, maxPerOrder: BigInt(preview.max_per_order), maxPerDay: BigInt(preview.max_per_day), validUntil: BigInt(Math.floor(preview.valid_until.getTime() / 1000)), nonce: BigInt(message.nonce) };
     if (recoverDelegationAddress(value, input.ownerSignature) !== owner) throw new AppError(401, "urn:aqua:error:delegation-signature", "Delegation signature was not made by the Ledger owner");
     const transactionHash = await this.relay.relay({ to: this.manifest.contracts.orderVaultFactory.address, data: encodeRegisterDelegation({ ...value, signature: input.ownerSignature }) });
@@ -149,12 +217,12 @@ export class TradeApiService {
   private toOrder(request: TradePreviewRequest, sell: ResolvedToken, buy: ResolvedToken): TradingOrder {
     const common = { pair: { baseToken: sell.address, quoteToken: buy.address }, side: "sell" as const, size: { denomination: request.amount.side === "sell" ? "base" as const : "quote" as const, amount: request.amount.value } };
     const policy = request.policy;
-    if (policy.kind === "market") return tradingOrderSchema.parse({ ...common, kind: "market", timeInForce: { kind: policy.timeInForce }, slippageBps: policy.slippageBps });
-    if (policy.kind === "limit") return tradingOrderSchema.parse({ ...common, ...policy });
-    if (policy.kind === "stopMarket" || policy.kind === "takeProfitMarket") return tradingOrderSchema.parse({ ...common, kind: policy.kind, triggerPrice: policy.triggerPrice, timeInForce: { kind: policy.timeInForce }, slippageBps: policy.slippageBps });
-    if (policy.kind === "stopLimit" || policy.kind === "takeProfitLimit") return tradingOrderSchema.parse({ ...common, ...policy });
-    if (policy.kind === "trailingStop") return tradingOrderSchema.parse({ ...common, kind: policy.kind, trail: policy.trail, ...(policy.activationPrice === undefined ? {} : { activationPrice: policy.activationPrice }), timeInForce: { kind: policy.timeInForce }, slippageBps: policy.slippageBps });
-    return tradingOrderSchema.parse({ ...common, ...policy });
+    if (policy.kind === "market") return parseRequired(tradingOrderSchema, { ...common, kind: "market", timeInForce: { kind: policy.timeInForce }, slippageBps: policy.slippageBps }, "Trading order");
+    if (policy.kind === "limit") return parseRequired(tradingOrderSchema, { ...common, ...policy }, "Trading order");
+    if (policy.kind === "stopMarket" || policy.kind === "takeProfitMarket") return parseRequired(tradingOrderSchema, { ...common, kind: policy.kind, triggerPrice: policy.triggerPrice, timeInForce: { kind: policy.timeInForce }, slippageBps: policy.slippageBps }, "Trading order");
+    if (policy.kind === "stopLimit" || policy.kind === "takeProfitLimit") return parseRequired(tradingOrderSchema, { ...common, ...policy }, "Trading order");
+    if (policy.kind === "trailingStop") return parseRequired(tradingOrderSchema, { ...common, kind: policy.kind, trail: policy.trail, ...(policy.activationPrice === undefined ? {} : { activationPrice: policy.activationPrice }), timeInForce: { kind: policy.timeInForce }, slippageBps: policy.slippageBps }, "Trading order");
+    return parseRequired(tradingOrderSchema, { ...common, ...policy }, "Trading order");
   }
 
   private transactions(value: unknown, found: UnsignedTransaction[] = []): readonly UnsignedTransaction[] {
@@ -168,20 +236,69 @@ export class TradeApiService {
     return found;
   }
 
-  private buildVaultAction(preparedBody: Readonly<Record<string, unknown>>, request: TradePreviewRequest, deployment: VaultDeployment, buyToken: Address, vault: Address, nonce: bigint, deadline: bigint): { readonly action: VaultAction; readonly fundingAmount: bigint; readonly kind: "market" | "resting" } {
-    const result = preparedEnvelopeSchema.parse(preparedBody).result;
-    if (request.policy.kind === "limit" && (request.policy.timeInForce.kind === "gtc" || request.policy.timeInForce.kind === "gtd")) {
-      const resting = restingPlanSchema.parse(result);
-      const fundingAmount = BigInt(resting.normalizedOrder.sellAmountUnits);
-      return { action: { vault, action: 0, strategy: resting.encodedOrder, tokens: [buyToken, deployment.sellToken], amounts: [0n, fundingAmount], nonce, deadline }, fundingAmount, kind: "resting" };
+  private async encodeRestingLimit(
+    order: TradingOrder, principal: AuthenticatedPrincipal, buyToken: Address, deployment: VaultDeployment, vault: Address, nonce: Hash, deadline: bigint,
+  ): Promise<{ readonly action: VaultAction; readonly fundingAmount: bigint; readonly matching: z.infer<typeof matchingSchema> | null }> {
+    const prepared = await this.trading.encodeRestingLimit(order, { ...principal, address: vault });
+    if (prepared.status !== 200) throw new AppError(422, "urn:aqua:error:non-executable-preview", "The trade policy did not produce a concrete immutable vault action");
+    const result = parseRequired(preparedEnvelopeSchema, prepared.body, "Prepared envelope").result;
+    const matching = matchingSchema.safeParse(parseRequired(z.record(z.string(), z.unknown()), result, "Prepared result")["matching"]);
+    const resting = parseRequired(restingPlanSchema, result, "Resting plan");
+    const fundingAmount = BigInt(resting.normalizedOrder.sellAmountUnits);
+    return {
+      action: { vault, action: 0, strategy: resting.encodedOrder, tokens: [buyToken, deployment.sellToken], amounts: [BigInt(resting.normalizedOrder.buyAmountUnits), fundingAmount], nonce, deadline },
+      fundingAmount, matching: matching.success ? matching.data : null,
+    };
+  }
+
+  private async buildVaultAction(
+    preparedBody: Readonly<Record<string, unknown>> | null, request: TradePreviewRequest, order: TradingOrder,
+    principal: AuthenticatedPrincipal, deployment: VaultDeployment, buyToken: Address, vault: Address, deadline: bigint,
+  ): Promise<VaultPlan> {
+    if (request.policy.kind === "market" || request.policy.kind === "limit") {
+      if (preparedBody === null) throw new AppError(422, "urn:aqua:error:non-executable-preview", "The trade policy did not produce a concrete immutable vault action");
+      const result = parseRequired(preparedEnvelopeSchema, preparedBody, "Prepared envelope").result;
+      const matching = matchingSchema.safeParse(parseRequired(z.record(z.string(), z.unknown()), result, "Prepared result")["matching"]);
+      if (request.policy.kind === "limit" && (request.policy.timeInForce.kind === "gtc" || request.policy.timeInForce.kind === "gtd") && matching.data?.outcome !== "fillsNow") {
+        const resting = parseRequired(restingPlanSchema, result, "Resting plan");
+        const fundingAmount = BigInt(resting.normalizedOrder.sellAmountUnits);
+        const action: VaultAction = { vault, action: 0, strategy: resting.encodedOrder, tokens: [buyToken, deployment.sellToken], amounts: [BigInt(resting.normalizedOrder.buyAmountUnits), fundingAmount], nonce: randomHash(), deadline };
+        return { action, legs: [{ role: "resting", action, triggerPrice: null, trail: null, activationPrice: null }], fundingAmount, kind: "resting", matching: matching.success ? matching.data : null };
+      }
+      const direct = immediateRouteSchema.safeParse(result);
+      const immediate = direct.success ? { orderedPlans: [direct.data] } : parseRequired(immediatePlanSchema, result, "Immediate plan");
+      if (immediate.orderedPlans.length !== 1) throw new AppError(409, "urn:aqua:error:multi-route", "The owner-controlled vault currently requires one atomic Aqua route");
+      const route = immediate.orderedPlans[0];
+      if (route?.transaction.to !== deployment.app) throw new AppError(409, "urn:aqua:error:route-target", "Prepared market route does not target the immutable vault app");
+      const fundingAmount = BigInt(route.requiredInputUnits);
+      const action: VaultAction = { vault, action: 3, strategy: route.transaction.data, tokens: [buyToken, deployment.sellToken], amounts: [BigInt(route.minimumOutputUnits), fundingAmount], nonce: randomHash(), deadline };
+      return { action, legs: [{ role: "market", action, triggerPrice: null, trail: null, activationPrice: null }], fundingAmount, kind: "market", matching: matching.success ? matching.data : { outcome: "fillsNow", expectedFillPrice: null, depthConsumedLevels: immediate.orderedPlans.length, depthConsumedBaseUnits: fundingAmount.toString(), unfilledRemainder: null, fokFeasible: request.policy.kind === "market" && request.policy.timeInForce === "fok" ? true : null } };
     }
-    if (request.policy.kind !== "market" && request.policy.kind !== "limit") throw new AppError(422, "urn:aqua:error:conditional-plan", "Conditional policies require a persisted trigger execution plan and are not yet eligible for vault submission");
-    const immediate = immediatePlanSchema.parse(result);
-    if (immediate.orderedPlans.length !== 1) throw new AppError(409, "urn:aqua:error:multi-route", "The owner-controlled vault currently requires one atomic Aqua route");
-    const route = immediate.orderedPlans[0];
-    if (route?.transaction.to !== deployment.app) throw new AppError(409, "urn:aqua:error:route-target", "Prepared market route does not target the immutable vault app");
-    const fundingAmount = BigInt(route.requiredInputUnits);
-    return { action: { vault, action: 3, strategy: route.transaction.data, tokens: [buyToken, deployment.sellToken], amounts: [BigInt(route.minimumOutputUnits), fundingAmount], nonce, deadline }, fundingAmount, kind: "market" };
+    const legs: VaultPlan["legs"][number][] = [];
+    const encodeLeg = async (role: string, limitPrice: string, triggerPrice: string | null, trail: unknown, activationPrice: string | null): Promise<void> => {
+      const synthetic = parseRequired(tradingOrderSchema, {
+        kind: "limit", pair: order.pair, side: order.side, size: order.size, limitPrice, timeInForce: { kind: "gtc" },
+        fillPolicy: "partial", postPolicy: "normal",
+      }, "Synthetic limit");
+      const encoded = await this.encodeRestingLimit(synthetic, principal, buyToken, deployment, vault, randomHash(), deadline);
+      legs.push({ role, action: encoded.action, triggerPrice, trail, activationPrice });
+    };
+    const policy = request.policy;
+    if (policy.kind === "stopMarket" || policy.kind === "takeProfitMarket") {
+      const worse = policy.kind === "stopMarket";
+      await encodeLeg(policy.kind === "stopMarket" ? "stop" : "takeProfit", applyBps(policy.triggerPrice, policy.slippageBps, worse), policy.triggerPrice, null, null);
+    } else if (policy.kind === "stopLimit" || policy.kind === "takeProfitLimit") {
+      await encodeLeg(policy.kind === "stopLimit" ? "stop" : "takeProfit", policy.limitPrice, policy.triggerPrice, null, null);
+    } else if (policy.kind === "trailingStop") {
+      await encodeLeg("trailing", applyBps("1", policy.slippageBps, true), null, policy.trail, policy.activationPrice ?? null);
+    } else if (policy.kind === "oco" || policy.kind === "bracket") {
+      const stopLimit = policy.kind === "oco" ? (policy.limitPrice ?? policy.stopLossPrice) : policy.stopLossPrice;
+      await encodeLeg("stop", stopLimit, policy.stopLossPrice, null, null);
+      await encodeLeg("takeProfit", policy.takeProfitPrice, policy.takeProfitPrice, null, null);
+    }
+    const first = legs[0]?.action;
+    if (first === undefined) throw new AppError(422, "urn:aqua:error:conditional-plan", "Conditional policy did not produce an armed vault action");
+    return { action: first, legs, fundingAmount: first.amounts[1] ?? 0n, kind: "armed", matching: { outcome: "rests", expectedFillPrice: legs[0]?.triggerPrice ?? null, depthConsumedLevels: 0, depthConsumedBaseUnits: "0", unfilledRemainder: null, fokFeasible: null } };
   }
 
   public async createPreview(request: TradePreviewRequest, principal: AuthenticatedPrincipal): Promise<TradePreviewResult> {
@@ -197,20 +314,12 @@ export class TradeApiService {
     const deployment: VaultDeployment = { owner: principal.address, delegate: agent, aqua: this.manifest.contracts.aqua.address, app: this.manifest.contracts.limitSwapRouter.address, sellToken: sell.address, salt };
     const vault = decodeAddress(await this.rpc.call({ to: this.manifest.contracts.orderVaultFactory.address, data: encodePredictVault(deployment) }));
     const preparedPrincipal: AuthenticatedPrincipal = { ...principal, address: vault };
-    const prepared = await this.trading.execute({ action: "createOrder", order }, preparedPrincipal, null);
-    if (prepared.status !== 200) throw new AppError(422, "urn:aqua:error:non-executable-preview", "The trade policy did not produce a concrete immutable vault action");
-    const actionNonce = decodeUint256(await this.rpc.call({ to: this.manifest.contracts.orderVaultFactory.address, data: encodeActionNonce(agent) }));
-    const vaultPlan = this.buildVaultAction(prepared.body, request, deployment, buy.address, vault, actionNonce, BigInt(Math.floor(expiresAt.getTime() / 1_000)));
-    const calls = this.transactions(prepared.body);
-    const checks: Readonly<Record<string, unknown>>[] = [];
-    for (const transaction of calls) {
-      try {
-        const [returnData, gas] = await Promise.all([this.rpc.call(transaction), this.rpc.estimateGas(transaction)]);
-        checks.push({ name: "rpcCall", target: transaction.to, selector: transaction.data.slice(0, 10), safe: true, gas: gas.toString(), returnData });
-      } catch (error: unknown) {
-        checks.push({ name: "rpcCall", target: transaction.to, selector: transaction.data.slice(0, 10), safe: true, deferredUntilFunded: true, error: error instanceof Error ? error.message : "simulation deferred" });
-      }
-    }
+    const conditional = request.policy.kind !== "market" && request.policy.kind !== "limit";
+    const prepared = conditional ? null : await this.trading.execute({ action: "createOrder", order }, preparedPrincipal, null);
+    if (prepared !== null && prepared.status !== 200) throw new AppError(422, "urn:aqua:error:non-executable-preview", "The trade policy did not produce a concrete immutable vault action");
+    const armedDeadline = BigInt(Math.floor((conditional ? createdAt.getTime() + 7 * 86_400_000 : expiresAt.getTime()) / 1_000));
+    const vaultPlan = await this.buildVaultAction(prepared?.body ?? null, request, order, principal, deployment, buy.address, vault, armedDeadline);
+    const calls = vaultPlan.kind === "market" && prepared !== null ? this.transactions(prepared.body) : [];
     const blockNumber = await this.rpc.blockNumber(); const block = await this.rpc.block(blockNumber);
     const sellAmountUnits = vaultPlan.fundingAmount;
     const balance = decodeUint256(await this.rpc.call({ to: sell.address, data: encodeBalanceOf(agent) }));
@@ -220,27 +329,41 @@ export class TradeApiService {
     const prerequisiteTransactions: UnsignedTransaction[] = [];
     if (wrapAmount > 0n) prerequisiteTransactions.push({ chainId: this.manifest.chain.id, from: agent, to: sell.address, data: hexSchema.parse("0xd0e30db0"), value: quantityToHex(wrapAmount) });
     if (allowance < sellAmountUnits) prerequisiteTransactions.push({ chainId: this.manifest.chain.id, from: agent, to: sell.address, data: encodeApprove(this.manifest.contracts.permit2.address, sellAmountUnits), value: quantityToHex(0n) });
-    checks.push({ name: "tokenCode", safe: true, codeHash: sell.codeHash });
-    checks.push({ name: "agentBalance", safe: sell.nativeReference ? nativeBalance !== null && balance + nativeBalance >= sellAmountUnits : balance >= sellAmountUnits, tokenBalance: balance.toString(), nativeBalance: nativeBalance?.toString() ?? null });
-    const criticalSafe = checks.every((check) => check["safe"] === true);
+    const simulated = await simulateFundedCalls({
+      rpc: this.rpc, calls, sellToken: sell.address, buyToken: buy.address, vault, owner: principal.address, agent,
+      fundingAmount: sellAmountUnits, minimumOutput: vaultPlan.action.amounts[0] ?? 0n,
+      permit2: this.manifest.contracts.permit2.address,
+      allowedSpenders: [this.manifest.contracts.permit2.address, this.manifest.contracts.aqua.address, this.manifest.contracts.limitSwapRouter.address, this.manifest.contracts.aquaSwapRouter.address],
+      spotSell: sell.spotPrice, spotBuy: buy.spotPrice,
+    });
+    const checks: Readonly<Record<string, unknown>>[] = [
+      ...simulated.checks,
+      { name: "tokenCode", safe: true, severity: "info", codeHash: sell.codeHash },
+      { name: "agentBalance", safe: sell.nativeReference ? nativeBalance !== null && balance + nativeBalance >= sellAmountUnits : balance >= sellAmountUnits, severity: "info", tokenBalance: balance.toString(), nativeBalance: nativeBalance?.toString() ?? null },
+    ];
+    const warnings = [...simulated.warnings, ...(sell.spotPrice === null || buy.spotPrice === null ? ["Fiat spot price unavailable; executable plan data remains authoritative"] : [])];
+    const criticalSafe = simulated.safe && checks.every((check) => check["safe"] === true);
     const previewId = crypto.randomUUID(); const lifecycleNonce = randomHash();
-    const disposition = request.policy.kind === "market" ? "immediate" : request.policy.kind === "limit" ? (calls.some((call) => call.to === this.manifest.contracts.aquaSwapRouter.address || call.to === this.manifest.contracts.limitSwapRouter.address) ? "immediate" : "resting") : "conditional";
+    const disposition = vaultPlan.kind === "market" ? "immediate" : vaultPlan.kind === "resting" ? "resting" : "conditional";
+    const groupNonce = randomHash();
     const unsigned = { previewId, expiresAt: expiresAt.toISOString(), owner: principal.address, agent, chainId: this.manifest.chain.id,
       normalizedTrade: { sellToken: sell.address, buyToken: buy.address, amount: request.amount, policy: request.policy, recipient: principal.address },
       tokens: { sell, buy }, spotPrice: { currency: this.quoter.defaultCurrency, sell: sell.spotPrice, buy: buy.spotPrice, observedAt: createdAt.toISOString(), provider: "1inch" },
-      disposition, delegation: { required: true, token: sell.address, suggestedMaxPerOrder: request.amount.side === "sell" ? request.amount.value : null, suggestedMaxPerDay: request.amount.side === "sell" ? request.amount.value : null, suggestedExpiresAt: new Date(createdAt.getTime() + 86_400_000).toISOString() },
+      disposition, matching: vaultPlan.matching,
+      delegation: { required: true, token: sell.address, suggestedMaxPerOrder: request.amount.side === "sell" ? request.amount.value : null, suggestedMaxPerDay: request.amount.side === "sell" ? request.amount.value : null, suggestedExpiresAt: new Date(Number(armedDeadline) * 1_000 + 86_400_000).toISOString() },
       prerequisites: { wrapRequired: wrapAmount > 0n, permit2ApprovalRequired: allowance < sellAmountUnits, transactions: prerequisiteTransactions },
-      plan: prepared.body, calls,
-      execution: { vault, deployment: { ...deployment }, action: { ...vaultPlan.action, amounts: vaultPlan.action.amounts.map(String), nonce: vaultPlan.action.nonce.toString(), deadline: vaultPlan.action.deadline.toString() }, fundingAmountUnits: sellAmountUnits.toString(), kind: vaultPlan.kind },
-      lifecycle: { domain: typedDomain(this.manifest), primaryType: "VaultAction", types: { VaultAction: [{ name: "vault", type: "address" }, { name: "action", type: "uint8" }, { name: "strategyHash", type: "bytes32" }, { name: "tokensHash", type: "bytes32" }, { name: "amountsHash", type: "bytes32" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] }, message: { vault, action: vaultPlan.action.action, strategyHash: keccakHex(hexToBytes(vaultPlan.action.strategy)), tokensHash: hashAddressArray(vaultPlan.action.tokens), amountsHash: hashUint256Array(vaultPlan.action.amounts), nonce: vaultPlan.action.nonce.toString(), deadline: vaultPlan.action.deadline.toString() } },
-      safety: { safe: criticalSafe, verdict: criticalSafe ? "simulatedWithFundedActivationCheck" : "unsafe", simulatedAt: createdAt.toISOString(), blockNumber: blockNumber.toString(), blockTimestamp: new Date(Number(block.timestamp) * 1000).toISOString(), checks, warnings: [...(sell.spotPrice === null || buy.spotPrice === null ? ["Fiat spot price unavailable; executable plan data remains authoritative"] : []), ...(checks.some((check) => check["deferredUntilFunded"] === true) ? ["The complete factory action is simulated again after exact vault funding and before broadcast"] : [])] },
+      plan: prepared?.body ?? { result: { matching: vaultPlan.matching } }, calls,
+      execution: { vault, deployment: { ...deployment }, action: serializeAction(vaultPlan.action), legs: vaultPlan.legs.map((leg) => ({ role: leg.role, action: serializeAction(leg.action), triggerPrice: leg.triggerPrice, trail: leg.trail, activationPrice: leg.activationPrice })), groupNonce, fundingAmountUnits: sellAmountUnits.toString(), kind: vaultPlan.kind, size: { denomination: request.amount.side === "sell" ? "base" : "quote", amount: request.amount.value } },
+      lifecycle: lifecycleFor(this.manifest, vaultPlan.action),
+      additionalLifecycles: vaultPlan.legs.slice(1).map((leg) => lifecycleFor(this.manifest, leg.action)),
+      safety: { safe: criticalSafe, verdict: simulated.verdict, simulatedAt: createdAt.toISOString(), blockNumber: blockNumber.toString(), blockTimestamp: new Date(Number(block.timestamp) * 1000).toISOString(), checks, warnings },
     };
     const previewHash = digest(unsigned); const body = { ...unsigned, previewHash };
-    await this.db`INSERT INTO trade_previews(id,preview_hash,owner,agent,state,request,response,lifecycle_nonce,expires_at,created_at) VALUES(${previewId},${previewHash},${principal.address},${agent},${criticalSafe ? "ready" : "unsafe"},${JSON.stringify(request)},${JSON.stringify(body)},${lifecycleNonce},${expiresAt},${createdAt})`;
+    await this.db`INSERT INTO trade_previews(id,preview_hash,owner,agent,state,request,response,lifecycle_nonce,expires_at,created_at) VALUES(${previewId},${previewHash},${principal.address},${agent},${criticalSafe ? "ready" : "unsafe"},${JSON.stringify(request)}::jsonb,${JSON.stringify(body)}::jsonb,${lifecycleNonce},${expiresAt},${createdAt})`;
     return { status: 201, body };
   }
 
-  public async submit(input: { readonly previewId: string; readonly previewHash: Hash; readonly lifecycleSignature: Hex }, principal: AuthenticatedPrincipal, paymentHeader: string | null, prerequisiteTransactions: readonly Hash[]): Promise<TradeSubmissionResult> {
+  public async submit(input: { readonly previewId: string; readonly previewHash: Hash; readonly lifecycleSignature: Hex; readonly additionalLifecycleSignatures?: readonly Hex[] | undefined }, principal: AuthenticatedPrincipal, paymentHeader: string | null, prerequisiteTransactions: readonly Hash[]): Promise<TradeSubmissionResult> {
     const previews = await this.db<PreviewRow[]>`SELECT id,preview_hash,owner,agent,state,request,response,lifecycle_nonce,expires_at,submitted_at FROM trade_previews WHERE id=${input.previewId}`;
     const preview = previews[0];
     if (preview?.owner !== principal.address) throw new AppError(404, "urn:aqua:error:preview", "Trade preview was not found");
@@ -249,19 +372,28 @@ export class TradeApiService {
     if (preview.state === "unsafe") throw new AppError(409, "urn:aqua:error:preview-unsafe", "Unsafe trade previews cannot be submitted");
     const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions FROM agent_order_operations WHERE id=${input.previewId}`;
     const existing = operations[0];
-    if (existing?.lifecycle_transaction !== null && existing?.lifecycle_transaction !== undefined) return { status: 200, body: this.submissionBody(existing.id, existing.state, existing.lifecycle_transaction, existing.payment_transaction, prerequisiteHashesSchema.parse(existing.prerequisite_transactions), existing.deployment_transaction) };
+    if (existing?.lifecycle_transaction !== null && existing?.lifecycle_transaction !== undefined) return { status: 200, body: this.submissionBody(existing.id, existing.state, existing.lifecycle_transaction, existing.payment_transaction, parseRequired(prerequisiteHashesSchema, existing.prerequisite_transactions, "Prerequisite transactions"), existing.deployment_transaction) };
     if (existing?.lifecycle_signature !== null && existing?.lifecycle_signature !== undefined && existing.lifecycle_signature !== input.lifecycleSignature) throw new AppError(409, "urn:aqua:error:idempotency", "Idempotent retry changed the lifecycle signature");
-    const lifecycle = typedDataSchema.parse(preview.response["lifecycle"]);
+    const response = jsonObject(preview.response, "Preview response");
+    const lifecycle = parseRequired(typedDataSchema, response["lifecycle"], "Lifecycle typed data");
     const recovered = recoverTypedDataAddress(lifecycle, input.lifecycleSignature);
     if (recovered !== preview.agent) throw new AppError(401, "urn:aqua:error:lifecycle-signature", "Lifecycle signature was not made by the bound agent");
-    const normalized = storedTradeSchema.parse(preview.response["normalizedTrade"]);
-    const execution = storedExecutionSchema.parse(preview.response["execution"]);
+    const additionalLifecycles = parseRequired(z.array(typedDataSchema), response["additionalLifecycles"] ?? [], "Additional lifecycles");
+    const additionalSignatures = input.additionalLifecycleSignatures ?? [];
+    if (additionalSignatures.length !== additionalLifecycles.length) throw new AppError(422, "urn:aqua:error:lifecycle-signature", "Every armed vault action must be signed");
+    for (const [index, typed] of additionalLifecycles.entries()) {
+      const signature = additionalSignatures[index];
+      if (signature === undefined || recoverTypedDataAddress(typed, signature) !== preview.agent) throw new AppError(401, "urn:aqua:error:lifecycle-signature", "Lifecycle signature was not made by the bound agent");
+    }
+    const normalized = parseRequired(storedTradeSchema, response["normalizedTrade"], "Normalized trade");
+    const execution = parseRequired(storedExecutionSchema, response["execution"], "Execution plan");
     if (execution.deployment.owner !== preview.owner || execution.deployment.delegate !== preview.agent || execution.deployment.sellToken !== normalized.sellToken || execution.vault !== execution.action.vault) throw new AppError(409, "urn:aqua:error:execution-plan", "Stored vault execution plan is internally inconsistent");
     const atomicAmount = execution.fundingAmountUnits;
     const delegations = await this.db<DelegationRow[]>`SELECT max_per_order::text,max_per_day::text,spent_today::text,day_number::text,valid_until FROM delegation_projections WHERE owner=${preview.owner} AND agent=${preview.agent} AND token=${normalized.sellToken}`;
     const delegation = delegations[0]; const today = BigInt(Math.floor(Date.now() / 86_400_000));
     const spent = delegation === undefined || BigInt(delegation.day_number) !== today ? 0n : BigInt(delegation.spent_today);
     if (delegation === undefined || delegation.valid_until <= new Date() || BigInt(atomicAmount) > BigInt(delegation.max_per_order) || spent + BigInt(atomicAmount) > BigInt(delegation.max_per_day)) throw new AppError(409, "urn:aqua:error:delegation-required", "An active Ledger delegation with sufficient per-order and daily capacity is required");
+    if (execution.kind === "armed" && delegation.valid_until.getTime() / 1000 < Number(execution.action.deadline)) throw new AppError(409, "urn:aqua:error:delegation-required", "Delegation expiry must cover the armed trigger deadline");
     const vault = execution.vault;
     const requirement = exactPermit2UpfrontRequirement(this.manifest, { operationId: preview.id, sellToken: normalized.sellToken, vault, atomicAmount });
     if (existing?.payment_transaction !== null && existing?.payment_transaction !== undefined && existing.action_payload !== null) return this.activateFunded(existing, preview.owner, preview.agent, normalized.sellToken, input.lifecycleSignature);
@@ -269,7 +401,10 @@ export class TradeApiService {
     const payload = decodePaymentSignatureHeader(paymentHeader); const accepted = requirement.accepts[0];
     if (accepted === undefined) throw new Error("x402 requirement has no payment option");
     const verification = await this.facilitator.verify(payload, accepted);
-    if (!verification.isValid || verification.payer?.toLowerCase() !== preview.agent) throw new AppError(402, "urn:aqua:error:x402-verification", verification.invalidMessage ?? "x402 payment payer or signature is invalid");
+    if (!verification.isValid || verification.payer?.toLowerCase() !== preview.agent.toLowerCase()) {
+      const reason = verification.invalidReason ?? verification.invalidMessage ?? "x402 payment payer or signature is invalid";
+      throw new AppError(402, "urn:aqua:error:x402-verification", `${reason}; payer=${verification.payer ?? "none"} agent=${preview.agent}`);
+    }
     const balanceBefore = decodeUint256(await this.rpc.call({ to: normalized.sellToken, data: encodeBalanceOf(vault) }));
     await this.recordSettlement(preview.id, preview.agent, payload, "settling", null, null);
     let settlement: SettleResponse;
@@ -286,16 +421,17 @@ export class TradeApiService {
       throw new AppError(409, "urn:aqua:error:token-balance-delta", "Funded token changed the vault balance by a non-exact amount; activation is blocked and the Ledger owner can recover deployed-vault funds");
     }
     await this.recordSettlement(preview.id, preview.agent, payload, "settled", fundingHash, null);
-    await this.db`INSERT INTO agent_order_operations(id,owner,agent,vault,sell_token,buy_token,sell_amount,funded_amount,state,lifecycle_nonce,payment_identifier,payment_transaction,action_payload,lifecycle_signature,prerequisite_transactions,created_at,updated_at) VALUES(${preview.id},${preview.owner},${preview.agent},${vault},${normalized.sellToken},${normalized.buyToken},${atomicAmount},${atomicAmount},'fundedActivationPending',${execution.action.nonce},${paymentIdentifier(preview.id)},${fundingHash},${JSON.stringify(execution)},${input.lifecycleSignature},${JSON.stringify(prerequisiteTransactions)},now(),now()) ON CONFLICT(id) DO UPDATE SET funded_amount=EXCLUDED.funded_amount,state='fundedActivationPending',payment_transaction=EXCLUDED.payment_transaction,action_payload=EXCLUDED.action_payload,lifecycle_signature=EXCLUDED.lifecycle_signature,prerequisite_transactions=EXCLUDED.prerequisite_transactions,updated_at=now()`;
+    const storedPayload = { ...execution, signatures: [input.lifecycleSignature, ...additionalSignatures] };
+    await this.db`INSERT INTO agent_order_operations(id,owner,agent,vault,sell_token,buy_token,sell_amount,funded_amount,state,lifecycle_nonce,payment_identifier,payment_transaction,action_payload,lifecycle_signature,prerequisite_transactions,created_at,updated_at) VALUES(${preview.id},${preview.owner},${preview.agent},${vault},${normalized.sellToken},${normalized.buyToken},${atomicAmount},${atomicAmount},'fundedActivationPending',${execution.action.nonce},${paymentIdentifier(preview.id)},${fundingHash},${JSON.stringify(storedPayload)}::jsonb,${input.lifecycleSignature},${JSON.stringify(prerequisiteTransactions)}::jsonb,now(),now()) ON CONFLICT(id) DO UPDATE SET funded_amount=EXCLUDED.funded_amount,state='fundedActivationPending',payment_transaction=EXCLUDED.payment_transaction,action_payload=EXCLUDED.action_payload,lifecycle_signature=EXCLUDED.lifecycle_signature,prerequisite_transactions=EXCLUDED.prerequisite_transactions,updated_at=now()`;
     await this.db`UPDATE trade_previews SET state='submitted',submitted_at=now() WHERE id=${preview.id} AND state='ready'`;
-    const stored: OperationRow = { id: preview.id, state: "fundedActivationPending", payment_transaction: fundingHash, deployment_transaction: null, lifecycle_transaction: null, action_payload: execution, lifecycle_signature: input.lifecycleSignature, prerequisite_transactions: prerequisiteTransactions };
+    const stored: OperationRow = { id: preview.id, state: "fundedActivationPending", payment_transaction: fundingHash, deployment_transaction: null, lifecycle_transaction: null, action_payload: storedPayload, lifecycle_signature: input.lifecycleSignature, prerequisite_transactions: prerequisiteTransactions };
     const activated = await this.activateFunded(stored, preview.owner, preview.agent, normalized.sellToken, input.lifecycleSignature);
     return { ...activated, paymentResponse: settlement };
   }
 
   private async activateFunded(operation: OperationRow, owner: Address, agent: Address, sellToken: Address, signature: Hex): Promise<TradeSubmissionResult> {
-    const execution = storedExecutionSchema.parse(operation.action_payload);
-    const prerequisiteTransactions = prerequisiteHashesSchema.parse(operation.prerequisite_transactions);
+    const execution = parseRequired(storedExecutionSchema, operation.action_payload, "Execution payload");
+    const prerequisiteTransactions = parseRequired(prerequisiteHashesSchema, operation.prerequisite_transactions, "Prerequisite transactions");
     let deploymentHash = operation.deployment_transaction;
     try {
       if (await this.rpc.getCode(execution.vault) === "0x") {
@@ -307,6 +443,22 @@ export class TradeApiService {
       }
       const balance = decodeUint256(await this.rpc.call({ to: sellToken, data: encodeBalanceOf(execution.vault) }));
       if (balance < BigInt(execution.fundingAmountUnits)) throw new Error("Vault funding is below the reviewed amount");
+      if (execution.kind === "armed") {
+        const legs = execution.legs ?? [{ role: "stop", action: execution.action, triggerPrice: null, trail: null, activationPrice: null }];
+        const signatures = execution.signatures ?? [signature];
+        const group = execution.groupNonce ?? randomHash();
+        const size = execution.size ?? { denomination: "base" as const, amount: "0" };
+        for (const [index, leg] of legs.entries()) {
+          const legSignature = signatures[index] ?? signature;
+          const intentHash = keccakHex(new TextEncoder().encode(`${operation.id}:${leg.role}:${leg.action.nonce}`));
+          await this.db`INSERT INTO trade_triggers(id,trade_id,owner,agent,vault,sell_token,buy_token,kind,role,trigger_price,trail,activation_price,high_water,size,group_nonce,intent_hash,action_payload,signature,status,created_at,updated_at) VALUES(${crypto.randomUUID()},${operation.id},${owner},${agent},${execution.vault},${execution.deployment.sellToken},${execution.action.tokens[0] ?? sellToken},${execution.kind},${leg.role},${leg.triggerPrice},${leg.trail === null ? null : JSON.stringify(leg.trail)}::jsonb,${leg.activationPrice},NULL,${JSON.stringify(size)}::jsonb,${group},${intentHash},${JSON.stringify(leg.action)}::jsonb,${legSignature},'armed',now(),now())`;
+        }
+        await this.db.begin(async (transaction) => {
+          await transaction`UPDATE agent_order_operations SET state='armed',updated_at=now() WHERE id=${operation.id}`;
+          await transaction`UPDATE delegation_projections SET spent_today=CASE WHEN day_number=${String(Math.floor(Date.now()/86_400_000))} THEN spent_today+${execution.fundingAmountUnits} ELSE ${execution.fundingAmountUnits} END,day_number=${String(Math.floor(Date.now()/86_400_000))},updated_at=now() WHERE owner=${owner} AND agent=${agent} AND token=${sellToken}`;
+        });
+        return { status: 200, body: this.submissionBody(operation.id, "armed", null, operation.payment_transaction, prerequisiteTransactions, deploymentHash) };
+      }
       const action = storedVaultAction(execution.action);
       const call = { to: this.manifest.contracts.orderVaultFactory.address, data: encodeExecuteVaultAction(action, signature) } as const;
       await Promise.all([this.rpc.call(call), this.rpc.estimateGas(call)]);
@@ -317,8 +469,10 @@ export class TradeApiService {
       });
       return { status: 200, body: this.submissionBody(operation.id, "broadcast", tradeHash, operation.payment_transaction, prerequisiteTransactions, deploymentHash) };
     } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "activation interrupted";
+      console.error(JSON.stringify({ level: "error", component: "trade-api", message: "vault activation failed", tradeId: operation.id, detail: message }));
       await this.db`UPDATE agent_order_operations SET state='fundedActivationPending',updated_at=now() WHERE id=${operation.id}`;
-      return { status: 202, body: { ...this.submissionBody(operation.id, "fundedActivationPending", null, operation.payment_transaction, prerequisiteTransactions, deploymentHash), operationId: paymentIdentifier(operation.id), activationError: error instanceof Error ? error.message : "activation interrupted" } };
+      return { status: 202, body: { ...this.submissionBody(operation.id, "fundedActivationPending", null, operation.payment_transaction, prerequisiteTransactions, deploymentHash), operationId: paymentIdentifier(operation.id), activationError: message } };
     }
   }
 
@@ -329,7 +483,7 @@ export class TradeApiService {
   }
 
   private async recordSettlement(previewId: string, payer: Address, payload: unknown, state: string, transactionHash: Hash | null, error: string | null): Promise<void> {
-    await this.db`INSERT INTO x402_settlements(payment_identifier,preview_id,payer,state,payload,transaction_hash,error,updated_at) VALUES(${paymentIdentifier(previewId)},${previewId},${payer},${state},${JSON.stringify(payload)},${transactionHash},${error},now()) ON CONFLICT(payment_identifier) DO UPDATE SET state=EXCLUDED.state,payload=EXCLUDED.payload,transaction_hash=COALESCE(EXCLUDED.transaction_hash,x402_settlements.transaction_hash),error=EXCLUDED.error,updated_at=now()`;
+    await this.db`INSERT INTO x402_settlements(payment_identifier,preview_id,payer,state,payload,transaction_hash,error,updated_at) VALUES(${paymentIdentifier(previewId)},${previewId},${payer},${state},${JSON.stringify(payload)}::jsonb,${transactionHash},${error},now()) ON CONFLICT(payment_identifier) DO UPDATE SET state=EXCLUDED.state,payload=EXCLUDED.payload,transaction_hash=COALESCE(EXCLUDED.transaction_hash,x402_settlements.transaction_hash),error=EXCLUDED.error,updated_at=now()`;
   }
 
   private submissionBody(id: string, status: string, tradeHash: Hash | null, fundingHash: Hash | null, prerequisiteTransactions: readonly Hash[], deploymentHash: Hash | null = null): Readonly<Record<string, unknown>> { return { tradeId: id, status, tradeTransactionHash: tradeHash, fundingTransactionHash: fundingHash, prerequisiteTransactionHashes: deploymentHash === null ? prerequisiteTransactions : [...prerequisiteTransactions, deploymentHash] }; }
@@ -354,6 +508,47 @@ export class TradeApiService {
     return { items, nextCursor };
   }
 
+  public async createCancellation(tradeId: string, owner: Address) {
+    const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions FROM agent_order_operations WHERE id=${tradeId} AND owner=${owner}`;
+    const operation = operations[0];
+    if (operation === undefined) throw new AppError(404, "urn:aqua:error:trade", "Trade was not found");
+    if (operation.state === "cancelled") throw new AppError(409, "urn:aqua:error:cancelled", "Trade is already cancelled");
+    const execution = parseRequired(storedExecutionSchema, operation.action_payload, "Execution payload");
+    const actionCode: 2 | 4 = execution.kind === "armed" || operation.state === "armed" ? 4 : 2;
+    if (actionCode === 2 && operation.state !== "broadcast") throw new AppError(409, "urn:aqua:error:cancel-state", "Only a resting live order can be cancelled with vault action 2");
+    if (actionCode === 4 && operation.state !== "armed") throw new AppError(409, "urn:aqua:error:cancel-state", "Only an armed conditional order can be unwound with vault action 4");
+    const action: VaultAction = {
+      vault: execution.vault, action: actionCode, strategy: hexSchema.parse("0x"),
+      tokens: actionCode === 4 ? [execution.deployment.sellToken] : execution.action.tokens,
+      amounts: [], nonce: randomHash(), deadline: BigInt(Math.floor(Date.now() / 1000) + 300),
+    };
+    const typedData = lifecycleFor(this.manifest, action);
+    const id = crypto.randomUUID();
+    const cancellationHash = digest({ id, action: serializeAction(action) });
+    const expiresAt = new Date(Date.now() + 300_000);
+    await this.db`INSERT INTO trade_cancellations(id,trade_id,cancellation_hash,action_payload,typed_data,expires_at) VALUES(${id},${tradeId},${cancellationHash},${JSON.stringify(serializeAction(action))}::jsonb,${JSON.stringify(typedData)}::jsonb,${expiresAt})`;
+    return { cancellationId: id, cancellationHash, lifecycle: typedData, expiresAt: expiresAt.toISOString() };
+  }
+
+  public async submitCancellation(tradeId: string, cancellationId: string, owner: Address, signature: Hex) {
+    const rows = await this.db<{ id: string; trade_id: string; cancellation_hash: Hash; action_payload: unknown; typed_data: unknown; expires_at: Date; used_at: Date | null }[]>`SELECT id,trade_id,cancellation_hash,action_payload,typed_data,expires_at,used_at FROM trade_cancellations WHERE id=${cancellationId} AND trade_id=${tradeId}`;
+    const cancellation = rows[0];
+    if (cancellation === undefined || cancellation.used_at !== null || cancellation.expires_at <= new Date()) throw new AppError(409, "urn:aqua:error:cancellation", "Cancellation is missing, expired, or already used");
+    const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions FROM agent_order_operations WHERE id=${tradeId} AND owner=${owner}`;
+    const operation = operations[0];
+    if (operation === undefined) throw new AppError(404, "urn:aqua:error:trade", "Trade was not found");
+    const typed = parseRequired(typedDataSchema, cancellation.typed_data, "Cancellation typed data");
+    if (recoverTypedDataAddress(typed, signature) !== (await this.boundAgent(owner))) throw new AppError(401, "urn:aqua:error:lifecycle-signature", "Cancellation signature was not made by the bound agent");
+    const action = storedVaultAction(parseRequired(storedActionSchema, cancellation.action_payload, "Cancellation action"));
+    const transactionHash = await this.relay.relay({ to: this.manifest.contracts.orderVaultFactory.address, data: encodeExecuteVaultAction(action, signature) });
+    await this.db.begin(async (transaction) => {
+      await transaction`UPDATE trade_cancellations SET used_at=now() WHERE id=${cancellationId} AND used_at IS NULL`;
+      await transaction`UPDATE agent_order_operations SET state='cancelled',updated_at=now() WHERE id=${tradeId}`;
+      await transaction`UPDATE trade_triggers SET status='cancelled',updated_at=now() WHERE trade_id=${tradeId} AND status IN ('armed','firing')`;
+    });
+    return { tradeId, status: "cancelled", transactionHash };
+  }
+
   public async wipeSubscribed(input: SubscribedTradesWipe, owner: Address): Promise<{ readonly deletedCount: string }> {
     const result: unknown = input.scope === "all" ? await this.db`DELETE FROM subscribed_trades WHERE owner=${owner}` : await this.db`DELETE FROM subscribed_trades WHERE owner=${owner} AND watched_address=${input.address}`;
     const count = typeof result === "object" && result !== null && "count" in result && (typeof result.count === "number" || typeof result.count === "bigint") ? BigInt(result.count) : 0n;
@@ -370,7 +565,7 @@ const prerequisiteHashesSchema = z.array(hashSchema).max(2);
 const preparedEnvelopeSchema = z.object({ result: z.unknown() }).loose();
 const restingPlanSchema = z.object({
   encodedOrder: hexSchema,
-  normalizedOrder: z.object({ sellAmountUnits: decimalIntegerSchema }).loose(),
+  normalizedOrder: z.object({ sellAmountUnits: decimalIntegerSchema, buyAmountUnits: decimalIntegerSchema }).loose(),
 }).loose();
 const immediateRouteSchema = z.object({
   transaction: z.object({ to: addressSchema, data: hexSchema }).loose(),
@@ -383,16 +578,23 @@ const storedDeploymentSchema = z.object({
   sellToken: addressSchema, salt: hashSchema,
 }).strict();
 const storedActionSchema = z.object({
-  vault: addressSchema, action: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
-  strategy: hexSchema, tokens: z.array(addressSchema).min(1).max(8), amounts: z.array(decimalIntegerSchema).min(1).max(8),
-  nonce: decimalIntegerSchema, deadline: decimalIntegerSchema,
+  vault: addressSchema, action: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
+  strategy: hexSchema, tokens: z.array(addressSchema).min(0).max(8), amounts: z.array(decimalIntegerSchema).min(0).max(8),
+  nonce: hashSchema, deadline: decimalIntegerSchema,
+}).strict();
+const storedLegSchema = z.object({
+  role: z.string().min(1).max(32), action: storedActionSchema, triggerPrice: z.string().nullable(),
+  trail: z.unknown(), activationPrice: z.string().nullable(),
 }).strict();
 const storedExecutionSchema = z.object({
   vault: addressSchema, deployment: storedDeploymentSchema, action: storedActionSchema,
-  fundingAmountUnits: decimalIntegerSchema, kind: z.enum(["market", "resting"]),
+  fundingAmountUnits: decimalIntegerSchema, kind: z.enum(["market", "resting", "armed"]),
+  legs: z.array(storedLegSchema).min(1).max(4).optional(), groupNonce: hashSchema.optional(),
+  size: z.object({ denomination: z.enum(["base", "quote"]), amount: z.string() }).strict().optional(),
+  signatures: z.array(hexSchema.refine((value) => value.length === 132, "signature must contain 65 bytes")).max(4).optional(),
 }).strict();
 const typedDataSchema = z.custom<Eip712TypedData>((value) => typeof value === "object" && value !== null && "domain" in value && "types" in value && "primaryType" in value && "message" in value);
 const storedVaultAction = (value: z.infer<typeof storedActionSchema>): VaultAction => ({
   vault: value.vault, action: value.action, strategy: value.strategy, tokens: value.tokens,
-  amounts: value.amounts.map(BigInt), nonce: BigInt(value.nonce), deadline: BigInt(value.deadline),
+  amounts: value.amounts.map(BigInt), nonce: value.nonce, deadline: BigInt(value.deadline),
 });

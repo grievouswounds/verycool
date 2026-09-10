@@ -31,11 +31,19 @@ export interface RpcCall {
   readonly value?: Quantity;
 }
 
+export interface RpcStateOverride {
+  readonly balance?: Quantity;
+  readonly nonce?: Quantity;
+  readonly code?: Hex;
+  readonly stateDiff?: Readonly<Record<Hash, Hash>>;
+}
+export type RpcStateOverrides = Readonly<Record<string, RpcStateOverride>>;
+
 export interface RpcPort {
   chainId(): Promise<number>;
   getCode(address: Address): Promise<Hex>;
-  call(transaction: RpcCall): Promise<Hex>;
-  estimateGas(transaction: RpcCall): Promise<bigint>;
+  call(transaction: RpcCall, overrides?: RpcStateOverrides): Promise<Hex>;
+  estimateGas(transaction: RpcCall, overrides?: RpcStateOverrides): Promise<bigint>;
   tokenDecimals(address: Address): Promise<number>;
   tokenSymbol(address: Address): Promise<string | null>;
   tokenName?(address: Address): Promise<string | null>;

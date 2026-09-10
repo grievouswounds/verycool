@@ -55,13 +55,15 @@ interface CredentialRow { credential_id: string; owner: Address; public_key: Uin
 const sqlRows = <T>(value: T | T[]): T[] => Array.isArray(value) ? value : [value];
 const transportsSchema = z.array(z.enum(["ble","cable","hybrid","internal","nfc","smart-card","usb"]));
 
+const parseTransports = (value: unknown): WebAuthnCredential["transports"] =>
+  transportsSchema.parse(typeof value === "string" ? JSON.parse(value) : value);
 export class PostgresLedgerWebAuthnStore implements LedgerWebAuthnStore {
   private readonly database: SQL;
   public constructor(database: SQL) { this.database = database; }
   public async saveChallenge(value: ChallengeRecord, expiresAt: Date): Promise<void> { await this.database`INSERT INTO webauthn_challenges(id,owner,kind,challenge,expires_at) VALUES(${value.id},${value.owner},${value.ceremony},${value.challenge},${expiresAt})`; }
   public async consumeChallenge(id: string, ceremony: Ceremony): Promise<ChallengeRecord | null> { const row=sqlRows(await this.database<ChallengeRow>`UPDATE webauthn_challenges SET used_at=now() WHERE id=${id} AND kind=${ceremony} AND used_at IS NULL AND expires_at>now() RETURNING id,owner,kind,challenge`)[0]; return row===undefined?null:{id:row.id,owner:row.owner,ceremony:row.kind,challenge:row.challenge}; }
-  public async saveCredential(value: CredentialRecord, aaguid: string): Promise<void> { await this.database`INSERT INTO webauthn_credentials(credential_id,owner,public_key,counter,transports,aaguid,device_type,backed_up) VALUES(${value.id},${value.owner},${value.publicKey},${value.counter},${JSON.stringify(value.transports??[])},${aaguid},'singleDevice',false)`; }
-  private map(row: CredentialRow): CredentialRecord { return { id:row.credential_id, owner:row.owner, publicKey:Uint8Array.from(row.public_key), counter:Number(row.counter), ...(row.transports===null?{}:{transports:transportsSchema.parse(row.transports)}) }; }
+  public async saveCredential(value: CredentialRecord, aaguid: string): Promise<void> { await this.database`INSERT INTO webauthn_credentials(credential_id,owner,public_key,counter,transports,aaguid,device_type,backed_up) VALUES(${value.id},${value.owner},${value.publicKey},${value.counter},${JSON.stringify(value.transports??[])}::jsonb,${aaguid},'singleDevice',false)`; }
+  private map(row: CredentialRow): CredentialRecord { return { id:row.credential_id, owner:row.owner, publicKey:Uint8Array.from(row.public_key), counter:Number(row.counter), transports: parseTransports(row.transports) }; }
   public async credential(id: string): Promise<CredentialRecord | null> { const row=sqlRows(await this.database<CredentialRow>`SELECT credential_id,owner,public_key,counter::text,transports FROM webauthn_credentials WHERE credential_id=${id}`)[0]; return row===undefined?null:this.map(row); }
   public async credentials(owner: Address): Promise<readonly CredentialRecord[]> { return sqlRows(await this.database<CredentialRow>`SELECT credential_id,owner,public_key,counter::text,transports FROM webauthn_credentials WHERE owner=${owner}`).map((row)=>this.map(row)); }
   public async advanceCounter(id: string, previous: number, next: number): Promise<boolean> { const result=sqlRows(await this.database<{credential_id:string}>`UPDATE webauthn_credentials SET counter=${next},last_used_at=now() WHERE credential_id=${id} AND counter=${previous} AND (${next}>counter OR (${next}=0 AND counter=0)) RETURNING credential_id`); return result.length===1; }

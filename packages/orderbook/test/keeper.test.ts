@@ -17,6 +17,7 @@ class Repository implements KeeperJobRepository {
   public async markSubmitted(_id: string, _worker: string, hash: Hash) { this.submitted = hash; }
   public async markComplete() { this.completed = true; }
   public async markFailed(_id: string, _worker: string, reason: string) { this.failed = reason; }
+  public async release() { this.job = readyJob(target); }
 }
 class Signer implements KeeperTransactionSigner { public readonly address = workerAddress; public sign(): Hex { return hexSchema.parse("0x02"); } }
 class Rpc {
@@ -45,5 +46,16 @@ describe("keeper transaction state machine", () => {
     repository.job = readyJob(addressSchema.parse("0x4444444444444444444444444444444444444444"));
     await new Keeper(repository, new Rpc(), new Signer(), configuration).runOnce("worker");
     expect(repository.failed).toBe("Keeper target is not allowlisted");
+  });
+
+  test("releases a job whose gas estimate is not yet executable", async () => {
+    const repository = new Repository();
+    repository.job = { ...readyJob(target), attempts: 1 };
+    class RevertingRpc extends Rpc {
+      public override async estimateGas(): Promise<bigint> { throw new Error("execution reverted: TriggerNotPersistent"); }
+    }
+    await new Keeper(repository, new RevertingRpc(), new Signer(), configuration).runOnce("worker");
+    expect(repository.failed).toBeNull();
+    expect(repository.submitted).toBeNull();
   });
 });

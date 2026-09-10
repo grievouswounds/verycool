@@ -133,6 +133,19 @@ contract AquaOrderVault {
         _cancel(tokens);
     }
 
+    /// @notice Returns listed token balances to the immutable Ledger owner. The factory is the
+    /// only caller, so an agent-signed action cannot choose a different recipient.
+    function returnToOwner(address[] calldata tokens) external nonReentrant onlyFactory {
+        if (activeOrderHash != bytes32(0) || tokens.length == 0) revert InvalidOrder();
+        for (uint256 index = 0; index < tokens.length; ++index) {
+            address token = tokens[index];
+            uint256 amount = IERC20VaultAsset(token).balanceOf(address(this));
+            if (amount == 0) continue;
+            emit Withdrawn(token, owner, amount);
+            _safeTransfer(token, owner, amount);
+        }
+    }
+
     function withdraw(address token, address recipient, uint256 amount) external nonReentrant onlyOwner {
         if (recipient == address(0)) revert InvalidOrder();
         uint256 balance = IERC20VaultAsset(token).balanceOf(address(this));
@@ -161,9 +174,10 @@ contract AquaOrderVault {
     function _validate(bytes calldata strategy, address[] calldata tokens, uint256[] calldata amounts)
         private view returns (uint256 amount)
     {
-        if (tokens.length != 2 || amounts.length != 2 || tokens[1] != sellToken || amounts[0] != 0) {
+        if (tokens.length != 2 || amounts.length != 2 || tokens[1] != sellToken || amounts[0] == 0) {
             revert InvalidOrder();
         }
+        // amounts[0] is the virtual buy/rate reserve Aqua quote loads; amounts[1] is sell inventory.
         Order memory order = abi.decode(strategy, (Order));
         if (order.maker != address(this) || order.data.length == 0) revert InvalidOrder();
         amount = amounts[1];
@@ -180,7 +194,7 @@ contract AquaOrderVault {
     }
 
     function _safeTransfer(address token, address recipient, uint256 amount) private {
-        // `withdraw`, the only caller, carries the `nonReentrant` modifier, which sets
+        // Callers (`withdraw` and `returnToOwner`) carry the `nonReentrant` modifier, which sets
         // `entered = true` before the function body (and therefore this call) runs; a
         // reentrant call back into any nonReentrant-guarded function reverts immediately.
         // forge-lint: disable-next-line(reentrancy-no-eth)

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { addressSchema, hashSchema, hexSchema } from "@aqua/core";
 import type { RpcBlock, RpcLog } from "@aqua/core";
-import { IntentAuthorizationService, TradingService } from "../src/index.ts";
+import { IntentAuthorizationService, TradingService, asRequestedPair, mergePairBooks } from "../src/index.ts";
 import type { IndexedFill, IndexedOrder, ProtocolGateway, StoredIntent, TradingRepository } from "../src/index.ts";
 
 const maker = addressSchema.parse("0x1111111111111111111111111111111111111111");
@@ -93,5 +93,51 @@ describe("unified trading service", () => {
     const result = await service.execute(command, { address: maker, sessionId: "s", scopes: new Set(["trading:write"]) }, null);
     expect(result.body["result"]).toEqual({ transaction: "prepared-swap" });
     expect(protocol.preparedSwaps).toBe(1);
+  });
+
+  test("reorients an inverted pair so a sell can take the opposite book", () => {
+    const inverted = asRequestedPair([indexedOrder("sell", "0.001", "1000")], quote, base);
+    expect(inverted[0]?.side).toBe("buy");
+    expect(inverted[0]?.baseToken).toBe(quote);
+  });
+
+  test("merges inverted-pair depth onto the requested pair without duplicating ids", () => {
+    const canonical = indexedOrder("sell", "0.001", "1000");
+    const other = {
+      ...indexedOrder("sell", "0.002", "500"), id: "other",
+      orderHash: hashSchema.parse(`0x${"22".repeat(32)}`), baseToken: quote, quoteToken: base,
+    };
+    const merged = mergePairBooks([canonical], [other], base, quote);
+    expect(merged).toHaveLength(2);
+    expect(merged.map((item) => item.side).sort()).toEqual(["buy", "sell"]);
+    expect(mergePairBooks([canonical], [canonical], base, quote)).toHaveLength(1);
+  });
+
+  test("encodes a resting limit even when the live book would fill it", async () => {
+    const repository = new MemoryRepository();
+    const protocol = new ProtocolStub();
+    const service = new TradingService(repository, protocol, new IntentAuthorizationService(repository, new RpcStub(), { chainId: 1, controller: router, validitySeconds: 300 }), 1);
+    const actor = { address: maker, sessionId: "s", scopes: new Set(["trading:read", "trading:write"]) };
+    const order = {
+      kind: "limit" as const, pair: { baseToken: base, quoteToken: quote }, side: "sell" as const,
+      size: { denomination: "base" as const, amount: "1" }, limitPrice: "9", timeInForce: { kind: "gtc" as const },
+      fillPolicy: "partial" as const, postPolicy: "normal" as const,
+    };
+    const crossing = await service.execute({ action: "createOrder", order }, actor, null);
+    expect(crossing.body["result"]).toMatchObject({ transaction: "swap" });
+    const resting = await service.encodeRestingLimit(order, actor);
+    expect(resting.body["result"]).toMatchObject({ transaction: "ship", matching: { outcome: "rests" } });
+  });
+
+  test("rejects FOK when the book cannot fill the full size", async () => {
+    const repository = new MemoryRepository();
+    const service = new TradingService(repository, new ProtocolStub(), new IntentAuthorizationService(repository, new RpcStub(), { chainId: 1, controller: router, validitySeconds: 300 }), 1);
+    expect(await rejected(service.execute({
+      action: "createOrder",
+      order: {
+        kind: "market", pair: { baseToken: base, quoteToken: quote }, side: "sell",
+        size: { denomination: "base", amount: "1000000" }, timeInForce: { kind: "fok" }, slippageBps: "50",
+      },
+    }, { address: maker, sessionId: "s", scopes: new Set(["trading:read", "trading:write"]) }, null))).toMatchObject({ status: 409 });
   });
 });

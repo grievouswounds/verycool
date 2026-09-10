@@ -7,6 +7,21 @@ const pair = {
 } as const;
 
 describe("agent-first trading input language", () => {
+  test("recognizes a market IOC order with string amounts", () => {
+    const result = tradingRequestSchema.parse({
+      action: "createOrder",
+      order: {
+        kind: "market", pair, side: "sell",
+        size: { denomination: "base", amount: "1" },
+        timeInForce: { kind: "ioc" }, slippageBps: "50",
+      },
+    });
+    expect(result.action).toBe("createOrder");
+    if (result.action !== "createOrder" || result.order.kind !== "market") throw new Error("wrong variant");
+    expect(result.order.timeInForce).toEqual({ kind: "ioc" });
+    expect(result.order.slippageBps).toBe("50");
+  });
+
   test("recognizes a minimal resting limit order and applies explicit defaults", () => {
     const result = tradingRequestSchema.parse({
       action: "createOrder",
@@ -21,6 +36,34 @@ describe("agent-first trading input language", () => {
     expect(result.order.timeInForce).toEqual({ kind: "gtc" });
     expect(result.order.fillPolicy).toBe("partial");
     expect(result.order.postPolicy).toBe("normal");
+  });
+
+  test("recognizes GTD with exactly one of expiresAt or lifetimeSeconds", () => {
+    const expires = tradingRequestSchema.parse({
+      action: "createOrder",
+      order: {
+        kind: "limit", pair, side: "sell", size: { denomination: "base", amount: "1" }, limitPrice: "2500",
+        timeInForce: { kind: "gtd", expiresAt: "2030-01-01T00:00:00Z" },
+      },
+    });
+    if (expires.action !== "createOrder" || expires.order.kind !== "limit") throw new Error("wrong variant");
+    expect(expires.order.timeInForce).toEqual({ kind: "gtd", expiresAt: "2030-01-01T00:00:00Z" });
+    const lifetime = tradingRequestSchema.parse({
+      action: "createOrder",
+      order: {
+        kind: "limit", pair, side: "sell", size: { denomination: "base", amount: "1" }, limitPrice: "2500",
+        timeInForce: { kind: "gtd", lifetimeSeconds: "300" },
+      },
+    });
+    if (lifetime.action !== "createOrder" || lifetime.order.kind !== "limit") throw new Error("wrong variant");
+    expect(lifetime.order.timeInForce).toEqual({ kind: "gtd", lifetimeSeconds: "300" });
+    expect(tradingRequestSchema.safeParse({
+      action: "createOrder",
+      order: {
+        kind: "limit", pair, side: "sell", size: { denomination: "base", amount: "1" }, limitPrice: "2500",
+        timeInForce: { kind: "gtd" },
+      },
+    }).success).toBe(false);
   });
 
   test("recognizes compact public book and personal order queries", () => {

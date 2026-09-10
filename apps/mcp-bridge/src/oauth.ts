@@ -31,12 +31,17 @@ const tokenRequest = async (apiUrl: string, values: Readonly<Record<string, stri
   });
   return tokenSchema.parse(await json(response));
 };
-const launchBrowser = (url: string): void => {
+const launchBrowser = (url: string, onDriverFailed: (error: Error) => void): void => {
   const e2eDriver = Bun.env["AQUA_E2E_OAUTH_DRIVER"];
   if (e2eDriver !== undefined) {
     if (Bun.env["AQUA_E2E"] !== "1") throw new Error("AQUA_E2E_OAUTH_DRIVER is restricted to AQUA_E2E=1");
-    const child = Bun.spawn([e2eDriver, url], { stdin: "ignore", stdout: "ignore", stderr: "inherit", env: Bun.env });
-    void child.exited.then((code) => { if (code !== 0) console.error(`E2E OAuth driver exited with ${String(code)}`); });
+    const child = Bun.spawn(
+      e2eDriver.endsWith(".ts") || e2eDriver.endsWith(".js") ? [process.execPath, e2eDriver, url] : [e2eDriver, url],
+      { stdin: "ignore", stdout: "ignore", stderr: "inherit", env: Bun.env },
+    );
+    void child.exited.then((code) => {
+      if (code !== 0) onDriverFailed(new Error(`E2E OAuth driver exited with ${String(code)}`));
+    });
     return;
   }
   const command = process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["cmd", "/c", "start", "", url] : ["xdg-open", url];
@@ -87,10 +92,10 @@ export const oauthAccessToken = async (apiUrl: string, cachePath: string, callba
   } });
   const authorize = new URL("/authorize", issuer);
   for (const [name, value] of Object.entries({ client_id: registration.client_id, redirect_uri: redirectUri, resource: metadata.resource, scope: "trading:read trading:write activity:read activity:write", state: expectedState, code_challenge: challenge, code_challenge_method: "S256", response_type: "code" })) authorize.searchParams.set(name, value);
-  launchBrowser(authorize.toString());
+  launchBrowser(authorize.toString(), (error) => { rejectCode(error); });
   const timer = setTimeout(() => { rejectCode(new Error("Ledger OAuth authorization timed out")); }, 300_000);
   let authorizationCode: string;
-  try { authorizationCode = await code; } finally { clearTimeout(timer); await callback.stop(true); }
+  try { authorizationCode = await code; } finally { clearTimeout(timer); await Bun.sleep(50); await callback.stop(true); }
   const tokens = await tokenRequest(issuer, { grant_type: "authorization_code", code: authorizationCode, client_id: registration.client_id, redirect_uri: redirectUri, resource: metadata.resource, code_verifier: verifier });
   const state = { clientId: registration.client_id, resource: metadata.resource, refreshToken: tokens.refresh_token, accessToken: tokens.access_token, expiresAt: Date.now() + tokens.expires_in * 1000 };
   await save(cachePath, state); return state.accessToken;

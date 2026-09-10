@@ -1,4 +1,4 @@
-import { activityListQuerySchema, activityWipeSchema, addressSchema, agentBindingRequestSchema, agentChallengeRequestSchema, AppError, challengeRequestSchema, delegationPreviewRequestSchema, delegationSubmitRequestSchema, hashSchema, parseStrictJson, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradePreviewRequestSchema, tradesListQuerySchema, tradeSubmitRequestSchema, tradingRequestSchema } from "@aqua/core";
+import { activityListQuerySchema, activityWipeSchema, addressSchema, agentBindingRequestSchema, agentChallengeRequestSchema, AppError, challengeRequestSchema, delegationPreviewRequestSchema, delegationSubmitRequestSchema, hashSchema, parseStrictJson, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradeCancellationSubmitRequestSchema, tradePreviewRequestSchema, tradesListQuerySchema, tradeSubmitRequestSchema, tradingRequestSchema } from "@aqua/core";
 import type { AuthenticatedPrincipal, AuthenticationScope, Hash, RuntimeManifest } from "@aqua/core";
 import type { AuthService, LedgerWebAuthnService, OAuthService } from "@aqua/adapters";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
@@ -28,6 +28,12 @@ export interface ServerDependencies {
 }
 
 interface ValidationIssue { readonly code: string; readonly path: string; readonly message: string }
+const flattenZodIssues = (error: ZodError): readonly ValidationIssue[] =>
+  error.issues.map((issue) => ({
+    code: issue.code,
+    path: issue.path.map(String).join("."),
+    message: issue.code === "invalid_union" ? `${issue.message} ${JSON.stringify(issue)}` : issue.message,
+  }));
 
 const problem = (status: number, type: string, detail: string, requestId: string, issues?: readonly ValidationIssue[]): Response =>
   Response.json({ type, title: statusTitle(status), status, detail, requestId, ...(issues === undefined ? {} : { issues }) }, {
@@ -182,15 +188,17 @@ const execute = async (request: Request, action: () => Promise<Response>, corsOr
     return response;
   } catch (error: unknown) {
     if (error instanceof AppError) {
+      console.error(JSON.stringify({ level: "error", requestId: id, type: error.type, status: error.status, message: error.message, url: request.url }));
       const response = problem(error.status, error.type, error.message, id);
       const challenge = authenticationChallenge(error);
       if (challenge !== null) response.headers.set("www-authenticate", challenge);
       return response;
     }
-    if (error instanceof ZodError) return problem(
-      422, "urn:aqua:error:validation", "Request does not belong to the endpoint input language", id,
-      error.issues.map((issue) => ({ code: issue.code, path: issue.path.map(String).join("."), message: issue.message })),
-    );
+    if (error instanceof ZodError) {
+      const issues = flattenZodIssues(error);
+      console.error(JSON.stringify({ level: "error", requestId: id, message: "Zod validation", issues, url: request.url }));
+      return problem(422, "urn:aqua:error:validation", "Request does not belong to the endpoint input language", id, issues);
+    }
     console.error(JSON.stringify({
       level: "error", requestId: id,
       message: error instanceof Error ? error.message : "Unknown error",
@@ -227,7 +235,7 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
       amountLanguage: "canonical unsigned decimal string; no signs, exponent notation, separators, or leading zeroes",
       tradingEndpoint: "POST /v1/trade-previews then POST /v1/trades",
       mcpTransport: "local stdio bridge; no remote /mcp endpoint",
-      mcpTools: ["request_trade","post_trade","get_trades","subscribe_to_user","unsubscribe_from_user","wipe_subscribed_trades"],
+      mcpTools: ["request_trade","post_trade","get_trades","cancel_trade","subscribe_to_user","unsubscribe_from_user","wipe_subscribed_trades"],
       actions: ["createOrder", "amendOrder", "cancelOrders", "executeOrder", "prepareSwap", "batch", "query", "manageWrappedNative"],
       orderKinds: ["market", "limit", "stopMarket", "stopLimit", "trailingStop", "takeProfitMarket", "takeProfitLimit", "oco", "bracket"],
       timeInForce: ["gtc", "gtd", "ioc", "fok"],
@@ -359,6 +367,15 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
         return response;
       }, dependencies.corsOrigin),
     },
+    "/v1/trades/:tradeId/cancellations": { POST: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+      return Response.json(await dependencies.tradeApi.createCancellation(z.uuid().parse(request.params["tradeId"]), principal.address), { status: 201 });
+    }, dependencies.corsOrigin) },
+    "/v1/trades/:tradeId/cancellations/:cancellationId": { PUT: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+      const input = tradeCancellationSubmitRequestSchema.parse(await parseJson(request));
+      return Response.json(await dependencies.tradeApi.submitCancellation(z.uuid().parse(request.params["tradeId"]), z.uuid().parse(request.params["cancellationId"]), principal.address, input.signature));
+    }, dependencies.corsOrigin) },
     "/v1/trade-subscriptions": { POST: (request) => execute(request, async () => {
       const principal = await bearer(request, dependencies.auth); requireScope(principal, "activity:write"); requireHardware(principal);
       const input = subscriptionRequestSchema.parse(await parseJson(request)); return Response.json(await dependencies.activity.subscribe(input.address, principal));
@@ -389,6 +406,14 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
       response.headers.set("allow", "GET");
       return response;
+    }
+    if (/^\/v1\/trades\/[0-9a-fA-F-]{36}\/cancellations$/u.test(path)) {
+      const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
+      response.headers.set("allow", "POST"); return response;
+    }
+    if (/^\/v1\/trades\/[0-9a-fA-F-]{36}\/cancellations\/[0-9a-fA-F-]{36}$/u.test(path)) {
+      const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
+      response.headers.set("allow", "PUT"); return response;
     }
     if (getPaths.has(path) || postPaths.has(path)) {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));

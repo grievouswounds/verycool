@@ -7,7 +7,7 @@ export const tokenReferenceSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("native") }).strict(),
 ]);
 
-const bps = z.string().regex(/^(?:0|[1-9][0-9]{0,4})$/u).refine((value) => BigInt(value) <= 10_000n);
+const bps = z.string().regex(/^(?:0|[1-9][0-9]{0,4})$/u).refine((value) => BigInt(value) <= 10_000n, "Basis points cannot exceed 10000");
 const price = positiveAmountSchema;
 const expiry = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("gtc") }).strict(),
@@ -35,7 +35,7 @@ const triggerLimitPolicy = z.object({
 }).strict();
 const trailingStopPolicy = z.object({
   kind: z.literal("trailingStop"), trail: z.discriminatedUnion("unit", [
-    z.object({ unit: z.literal("bps"), value: bps.refine((value) => BigInt(value) > 0n) }).strict(),
+    z.object({ unit: z.literal("bps"), value: bps.refine((value) => BigInt(value) > 0n, "Trail must be greater than zero") }).strict(),
     z.object({ unit: z.literal("quote"), value: price }).strict(),
   ]), activationPrice: price.optional(), slippageBps: bps.default("50"), timeInForce: z.enum(["ioc", "fok"]).default("ioc"),
 }).strict();
@@ -63,13 +63,20 @@ export const tradePreviewRequestSchema = z.object({
 }).strict();
 
 export const agentChallengeRequestSchema = z.object({ agent: addressSchema }).strict();
-export const agentBindingRequestSchema = z.object({ challengeId: z.uuid(), agent: addressSchema, signature: hexSchema.refine((value) => value.length === 132) }).strict();
+export const agentBindingRequestSchema = z.object({ challengeId: z.uuid(), agent: addressSchema, signature: hexSchema.refine((value) => value.length === 132, "signature must contain 65 bytes") }).strict();
 export const delegationPreviewRequestSchema = z.object({
   agent: addressSchema, token: addressSchema, maxPerOrder: positiveAmountSchema,
   maxPerDay: positiveAmountSchema, expiresAt: z.iso.datetime({ offset: true }),
 }).strict();
-export const delegationSubmitRequestSchema = z.object({ previewId: z.uuid(), previewHash: hashSchema, ownerSignature: hexSchema.refine((value) => value.length === 132) }).strict();
-export const tradeSubmitRequestSchema = z.object({ previewId: z.uuid(), previewHash: hashSchema, lifecycleSignature: hexSchema.refine((value) => value.length === 132) }).strict();
+export const delegationSubmitRequestSchema = z.object({ previewId: z.uuid(), previewHash: hashSchema, ownerSignature: hexSchema.refine((value) => value.length === 132, "signature must contain 65 bytes") }).strict();
+export const tradeSubmitRequestSchema = z.object({
+  previewId: z.uuid(), previewHash: hashSchema,
+  lifecycleSignature: hexSchema.refine((value) => value.length === 132, "signature must contain 65 bytes"),
+  additionalLifecycleSignatures: z.array(hexSchema.refine((value) => value.length === 132, "signature must contain 65 bytes")).max(4).optional(),
+}).strict();
+export const tradeCancellationSubmitRequestSchema = z.object({
+  signature: hexSchema.refine((value) => value.length === 132, "signature must contain 65 bytes"),
+}).strict();
 
 const pageSize = z.string().regex(/^(?:[1-9]|[1-9][0-9]|1[0-9]{2}|200)$/u).transform(Number);
 export const tradesListQuerySchema = z.object({

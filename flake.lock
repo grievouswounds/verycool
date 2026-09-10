@@ -156,17 +156,17 @@
     "swapvm": {
       "flake": false,
       "locked": {
-        "lastModified": 1788462416,
-        "narHash": "sha256-5uMvpsMddN1KA4i31bFxj4r8YFH8tbIJpzWER/Llw9w=",
+        "lastModified": 1785046505,
+        "narHash": "sha256-qkRgK8QEe4nNDpWkn9dcrShWl1y8n72c1geEqPtprcM=",
         "owner": "1inch",
         "repo": "swap-vm",
-        "rev": "f09a41e689240adc645934f965c8061749397cd2",
+        "rev": "32c687c2b73101fc26549e48fa1ff8a4d73afbac",
         "type": "github"
       },
       "original": {
         "owner": "1inch",
         "repo": "swap-vm",
-        "rev": "f09a41e689240adc645934f965c8061749397cd2",
+        "rev": "32c687c2b73101fc26549e48fa1ff8a4d73afbac",
         "type": "github"
       }
     },

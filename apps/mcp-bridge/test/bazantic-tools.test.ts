@@ -3,7 +3,7 @@ import { discoverAquaTools, schemaFingerprint } from "../src/bazantic-tools.ts";
 
 const catalogUrl = "https://catalog.e2e.invalid/mcp/";
 const gatewayUrl = "https://aqua.e2e.invalid/mcp";
-const aliases = ["requestTrade", "postTrade", "getTrades", "subscribeToUser", "unsubscribeFromUser", "wipeSubscribedTrades"];
+const aliases = ["requestTrade", "postTrade", "getTrades", "cancelTrade", "subscribeToUser", "unsubscribeFromUser", "wipeSubscribedTrades"];
 const sse = (value: unknown): Response => new Response(`event: message\ndata: ${JSON.stringify(value)}\n\n`, {
   headers: { "content-type": "text/event-stream" },
 });
@@ -32,7 +32,7 @@ describe("Bazantic-backed Aqua MCP catalog", () => {
     expect(result.gatewaySlug).toBe("aqua");
     expect(result.mcpUrl).toBe(gatewayUrl);
     expect(Object.keys(result.fingerprints).sort()).toEqual([
-      "get_trades", "post_trade", "request_trade", "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades",
+      "cancel_trade", "get_trades", "post_trade", "request_trade", "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades",
     ]);
     expect(new Set(Object.values(result.fingerprints)).size).toBe(1);
   });

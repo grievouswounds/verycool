@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { addressSchema, hashSchema, hexSchema } from "@aqua/core";
 import type { Eip712TypedData } from "../src/crypto.ts";
 import {
-  encodeX402ExactSettle, hashTypedData, recoverTypedDataAddress, selector, signTypedData, signingKeyAddress,
+  decodeOrder, encodeOrder, encodeX402ExactSettle, hashTypedData, initializeCubane, recoverTypedDataAddress, selector, signTypedData, signingKeyAddress,
 } from "../src/index.ts";
 
 const key = hexSchema.parse(`0x${"0".repeat(63)}1`);
@@ -30,6 +30,17 @@ describe("Cubane EIP-712 signer", () => {
   });
 });
 
+describe("Cubane SwapVM order ABI", () => {
+  test("encodes Order as a 1-tuple so SwapVM.hash of Cubane swap calldata matches the shipped strategy", () => {
+    initializeCubane();
+    const maker = addressSchema.parse("0x1111111111111111111111111111111111111111");
+    const encoded = encodeOrder({ maker, traits: 1n << 254n, data: hexSchema.parse("0xabcd") });
+    expect(encoded.slice(0, 66)).toBe(`0x${"20".padStart(64, "0")}`);
+    expect(encoded.slice(66, 130)).toBe(maker.slice(2).padStart(64, "0"));
+    expect(decodeOrder(encoded)).toEqual({ maker, traits: 1n << 254n, data: hexSchema.parse("0xabcd") });
+  });
+});
+
 describe("Cubane x402 ABI", () => {
   test("encodes exact Permit2 settlement calldata", () => {
     const calldata = encodeX402ExactSettle(
@@ -42,6 +53,6 @@ describe("Cubane x402 ABI", () => {
       hexSchema.parse("0x1234"),
     );
     expect(calldata.slice(0, 10)).toBe(selector("settle(((address,uint256),uint256,uint256),address,(address,uint256),bytes)") );
-    expect(calldata.length).toBeGreaterThan(10 + 64 * 7);
+    expect(calldata).toBe("0x13cd3b530000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000444444444444444444444444444444444444444400000000000000000000000055555555555555555555555555555555555555550000000000000000000000000000000000000000000000000000000000000009000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000021234000000000000000000000000000000000000000000000000000000000000");
   });
 });

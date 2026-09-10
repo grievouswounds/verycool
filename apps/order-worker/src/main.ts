@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { PostgresKeeperJobRepository, PostgresTradingRepository, createDatabase, closeDatabase } from "@aqua/adapters";
+import { PostgresKeeperJobRepository, PostgresTradingRepository, PostgresTradeTriggerRepository, createDatabase, closeDatabase } from "@aqua/adapters";
 import { hexSchema, loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
 import { JsonRpcClient, initializeCubane } from "@aqua/evm";
 import type { Eip1559Transaction } from "@aqua/evm";
@@ -17,7 +17,7 @@ const broker=new SecretBrokerClient(manifest.services.brokerSocket);const identi
 const keeperRepository=new PostgresKeeperJobRepository(database);await keeperRepository.initialize();
 const signer={address:identity.keeper,sign:(transaction:Eip1559Transaction)=>broker.signEip1559(transaction)};
 const keeper=new Keeper(keeperRepository,rpc,signer,{chainId:manifest.chain.id,allowedTargets:manifest.keeper.allowedTargets,allowedSelectors:manifest.keeper.allowedSelectors.map((selector)=>hexSchema.parse(selector)),gasLimit:defaults.keeperGasLimitCeiling,maxFeePerGas:defaults.keeperMaxFeePerGasCeiling,replacementSeconds:defaults.keeperReplacementSeconds,leaseSeconds:defaults.keeperLeaseSeconds});
-const triggers=new TriggerEvaluator(repository,keeperRepository,{controller:manifest.contracts.intentController.address,minimumBlocks:BigInt(defaults.triggerMinimumBlocks),minimumSeconds:BigInt(defaults.triggerMinimumSeconds)});
+const triggers=new TriggerEvaluator(repository,keeperRepository,{controller:manifest.contracts.intentController.address,matcher:manifest.contracts.boundedMatcher.address,factory:manifest.contracts.orderVaultFactory.address,minimumBlocks:BigInt(defaults.triggerMinimumBlocks),minimumSeconds:BigInt(defaults.triggerMinimumSeconds)},new PostgresTradeTriggerRepository(database));
 console.log(JSON.stringify({level:"info",component:"order-worker",manifestHash:runtimeManifestHash(manifest)}));
 const workerId=randomUUID();const runCycle=async():Promise<void>=>{await indexer.runOnce();const head=await rpc.blockNumber();if(head>=BigInt(manifest.indexer.confirmations)){const confirmed=await rpc.block(head-BigInt(manifest.indexer.confirmations));await triggers.runOnce(confirmed.number,confirmed.timestamp);}await keeper.runOnce(workerId);};
 let stopped=false;let timer:ReturnType<typeof setTimeout>|undefined;const schedule=():void=>{if(stopped)return;timer=setTimeout(()=>{void runCycle().catch((error:unknown)=>{console.error(JSON.stringify({level:"error",component:"order-worker",message:error instanceof Error?error.message:"Unknown worker error"}));}).finally(schedule);},defaults.orderbookPollIntervalSeconds*1_000);};

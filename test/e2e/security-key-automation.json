@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "regexp": "Register$|Log in$",
+      "actions": [
+        ["button", 1, true],
+        ["button", 2, true],
+        ["button", 1, false],
+        ["button", 2, false]
+      ]
+    },
+    {
+      "regexp": "Hold to approve|Hold to sign",
+      "actions": [
+        ["button", 1, true],
+        ["button", 2, true],
+        ["button", 1, false],
+        ["button", 2, false]
+      ]
+    },
+    {
+      "regexp": "This website|Origin|User ID|Continue|Allow|Review",
+      "actions": [
+        ["button", 2, true],
+        ["button", 2, false]
+      ]
+    }
+  ]
+}

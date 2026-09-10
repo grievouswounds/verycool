@@ -1,4 +1,5 @@
 /* global console */
+import "./json-bigint.mjs";
 import { DeviceActionStatus, DeviceManagementKitBuilder, DeviceModelId, UserInteractionRequired } from "@ledgerhq/device-management-kit";
 import { SignerEthBuilder } from "@ledgerhq/device-signer-kit-ethereum";
 import { nodeHidTransportFactory } from "@ledgerhq/device-transport-kit-node-hid";
@@ -20,7 +21,12 @@ const runAction = async (action) => {
     filter((value) => value.status === DeviceActionStatus.Completed || value.status === DeviceActionStatus.Error || value.status === DeviceActionStatus.Stopped),
     timeout(deviceTimeoutMs),
   ));
-  if (state.status === DeviceActionStatus.Error) throw state.error;
+  if (state.status === DeviceActionStatus.Error) {
+    const error = state.error;
+    const code = error !== null && typeof error === "object" && "errorCode" in error ? String(error.errorCode) : "";
+    const message = error instanceof Error ? error.message : JSON.stringify(error);
+    throw new Error(`Ledger device action failed: ${message}${code.length > 0 ? ` (${code})` : ""}`);
+  }
   if (state.status === DeviceActionStatus.Stopped) throw new Error("Ledger operation was cancelled");
   return state.output;
 };
@@ -39,12 +45,75 @@ const withLedger = async (operation) => {
     device: devices[0],
     sessionRefresherOptions: { isRefresherDisabled: requestedTransport === "speculos", pollingInterval: 3000 },
   });
+  const stop = new AbortController();
+  const speculosUrl = process.env.AQUA_SPECULOS_URL ?? "http://127.0.0.1:5000";
+  const masher = requestedTransport === "speculos" ? mashSpeculos(speculosUrl, stop.signal) : Promise.resolve();
   try {
     const signer = new SignerEthBuilder({ dmk, sessionId }).build();
     const { address } = await runAction(signer.getAddress(derivationPath, { checkOnDevice: false }));
     return await operation(signer, address);
-  } finally { await dmk.disconnect({ sessionId }); await dmk.close(); }
+  } finally { stop.abort(); await masher; await dmk.disconnect({ sessionId }); await dmk.close(); }
 };
 export const ledgerAddress = () => withLedger((_signer, owner) => owner);
 export const ledgerSignMessage = (message) => withLedger(async (signer, owner) => ({ owner, signature: await runAction(signer.signMessage(derivationPath, message)) }));
-export const ledgerSignTypedData = (typedData) => withLedger(async (signer, owner) => ({ owner, signature: await runAction(signer.signTypedData(derivationPath, typedData)) }));
+const asTypedData = (value) => {
+  if (typeof value !== "object" || value === null) throw new Error("Ledger typed data is missing");
+  const record = value;
+  const domain = record.domain;
+  const types = record.types;
+  const primaryType = record.primaryType;
+  const message = record.message;
+  if (typeof domain !== "object" || domain === null || typeof types !== "object" || types === null || typeof primaryType !== "string" || typeof message !== "object" || message === null) {
+    throw new Error("Ledger typed data is missing domain, types, primaryType, or message");
+  }
+  const chainId = domain.chainId;
+  return {
+    domain: {
+      name: domain.name, version: domain.version, verifyingContract: domain.verifyingContract,
+      chainId: typeof chainId === "string" ? Number(chainId) : chainId,
+    },
+    types, primaryType, message,
+  };
+};
+const requestedTransportOf = () => process.env.AQUA_LEDGER_TRANSPORT ?? "node-hid";
+const speculosText = async (url) => {
+  const body = await (await fetch(`${url}/events?currentscreenonly=true`)).json();
+  const events = Array.isArray(body.events) ? body.events : [];
+  return events.map((event) => String(event.text ?? "").trim()).filter((line) => line.length > 0).join("\n");
+};
+const mashSpeculos = async (url, signal) => {
+  const press = async (button) => {
+    await fetch(`${url}/button/${button}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "press-and-release" }),
+    });
+  };
+  let last = "";
+  while (!signal.aborted) {
+    try {
+      const text = await speculosText(url);
+      if (text !== last) { console.error(`Speculos screen:\n${text}`); last = text; }
+      const lowered = text.toLowerCase();
+      const idle = lowered.length === 0 || lowered.includes("is ready") || lowered.includes("quit") || lowered === "ethereum"
+        || lowered.includes("app settings")
+        || (lowered.includes("blind signing") && /(?:enabled|disabled)/u.test(lowered) && !lowered.includes("must"));
+      if (!idle) {
+        const confirm = /hold to sign|hold to approve|hold to|accept risk|both buttons|approve|sign typed/.test(lowered)
+          || (/\bsign message\b/.test(lowered) && !/typed data/.test(lowered));
+        await press(confirm ? "both" : "right");
+      }
+    } catch { /* Speculos may be between screens. */ }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+};
+export const ledgerSignTypedData = (typedData) => withLedger(async (signer, owner) => {
+  try {
+    return { owner, signature: await runAction(signer.signTypedData(derivationPath, asTypedData(typedData))) };
+  } catch (error) {
+    if (requestedTransportOf() === "speculos") {
+      const url = process.env.AQUA_SPECULOS_URL ?? "http://127.0.0.1:5000";
+      try { console.error(`Speculos screen after typed-data failure: ${await speculosText(url)}`); }
+      catch { /* Speculos may already have exited. */ }
+    }
+    throw error;
+  }
+});

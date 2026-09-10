@@ -33,6 +33,8 @@ const oneAddressSchema = z.tuple([addressSchema]);
 const twoAddressSchema = z.tuple([addressSchema, addressSchema]);
 const validSignatureSchema = z.tuple([hashSchema, hexSchema]);
 const typedDataSchema = z.custom<Eip712TypedData>((value) => typeof value === "object" && value !== null && "domain" in value && "types" in value && "primaryType" in value && "message" in value);
+const aggregateCallSchema = z.object({ target: addressSchema, callData: hexSchema }).loose();
+const tryAggregateArgsSchema = z.tuple([z.boolean(), z.array(aggregateCallSchema)]);
 
 const encodeContractCall = (functionName: string, args: readonly unknown[]): Hex => {
   if (functionName === "settle") {
@@ -65,9 +67,24 @@ const readContract = async (args: { address: `0x${string}`; abi: readonly unknow
   if (args.functionName === "allowance") { const parsed = twoAddressSchema.parse(values); return decodeUint256(await rpc.call({ to: address, data: encodeAllowance(parsed[0], parsed[1]) })); }
   if (args.functionName === "PERMIT2") return decodeAddress(await rpc.call({ to: address, data: selector("PERMIT2()") }));
   if (args.functionName === "isValidSignature") { const parsed = validSignatureSchema.parse(values); const result = await rpc.call({ to: address, data: encodeIsValidSignature(parsed[0], parsed[1]) }); return hexSchema.parse(result.slice(0, 10)); }
+  if (args.functionName === "tryAggregate") {
+    const [, calls] = tryAggregateArgsSchema.parse(values);
+    const results: { success: boolean; returnData: Hex }[] = [];
+    for (const call of calls) {
+      try { results.push({ success: true, returnData: await rpc.call({ to: call.target, data: call.callData }) }); }
+      catch { results.push({ success: false, returnData: hexSchema.parse("0x") }); }
+    }
+    return results;
+  }
   if (args.functionName === "settle" || args.functionName === "settleWithPermit") {
-    await rpc.call({ from: identity.facilitator, to: address, data: encodeContractCall(args.functionName, values) });
-    return undefined;
+    try {
+      await rpc.call({ from: identity.facilitator, to: address, data: encodeContractCall(args.functionName, values) });
+      return undefined;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "settle simulation reverted";
+      console.error(JSON.stringify({ level: "error", component: "x402-facilitator", message: "settle simulation failed", functionName: args.functionName, detail: message }));
+      throw error;
+    }
   }
   throw new Error(`Unsupported x402 contract read: ${args.functionName}`);
 };

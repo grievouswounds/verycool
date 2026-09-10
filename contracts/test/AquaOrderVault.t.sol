@@ -49,47 +49,27 @@ contract AquaOrderVaultTest {
         address owner = vm.addr(OWNER_KEY);
         address agent = vm.addr(AGENT_KEY);
         MockVaultToken token = new MockVaultToken();
-        MockVaultToken quote = new MockVaultToken();
         MockAquaOrderBook aqua = new MockAquaOrderBook();
         AquaOrderVaultFactory factory = new AquaOrderVaultFactory();
-
-        // casting to 'uint64' is safe because block.timestamp + 1 days stays far below
-        // type(uint64).max for billions of years.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        uint64 validUntil = uint64(block.timestamp + 1 days);
-        bytes32 delegation = keccak256(abi.encode(
-            factory.DELEGATION_TYPEHASH(), owner, agent, address(token), uint256(100), uint256(200),
-            uint256(validUntil), uint256(0)
-        ));
-        factory.registerDelegation(owner, agent, address(token), 100, 200, validUntil,
-            _signature(OWNER_KEY, _digest(factory.DOMAIN_SEPARATOR(), delegation)));
-
-        AquaOrderVault vault = factory.deployVault(
-            owner, agent, address(aqua), address(0xA9), address(token), bytes32(uint256(7))
-        );
-        token.mint(address(vault), 100);
+        AquaOrderVault vault = _fundedVault(factory, owner, agent, aqua, token, bytes32(uint256(7)));
         bytes memory strategy = abi.encode(AquaOrderVault.Order(address(vault), 1 << 254, hex"0102"));
         address[] memory tokens = new address[](2);
-        tokens[0] = address(quote); tokens[1] = address(token);
+        tokens[0] = address(new MockVaultToken()); tokens[1] = address(token);
         uint256[] memory amounts = new uint256[](2);
-        amounts[0] = 0; amounts[1] = 100;
-        uint256 deadline = block.timestamp + 60;
+        amounts[0] = 50; amounts[1] = 100;
         AquaOrderVaultFactory.LifecycleRequest memory request = AquaOrderVaultFactory.LifecycleRequest({
-            vault: vault, action: 0, strategy: strategy, tokens: tokens, amounts: amounts, deadline: deadline
+            vault: vault, action: 0, strategy: strategy, tokens: tokens, amounts: amounts, nonce: bytes32(uint256(1)), deadline: block.timestamp + 60
         });
-        factory.execute(request, _actionSignature(factory, request, AGENT_KEY, 0));
+        factory.execute(request, _actionSignature(factory, request, AGENT_KEY));
         require(aqua.ships() == 1 && vault.committedAmount() == 100, "order not activated");
-
         request.action = 2;
         request.strategy = "";
         request.amounts = new uint256[](0);
-        factory.execute(request, _actionSignature(factory, request, AGENT_KEY, 1));
+        request.nonce = bytes32(uint256(2));
+        factory.execute(request, _actionSignature(factory, request, AGENT_KEY));
         require(aqua.docks() == 1 && vault.activeOrderHash() == bytes32(0), "order not cancelled");
-
         vm.prank(owner);
         vault.withdraw(address(token), owner, 100);
-        // MockVaultToken above is a fully deterministic in-memory mock controlled by this test,
-        // not an externally-influenced token, so an exact balance assertion is intentional here.
         // forge-lint: disable-next-line(incorrect-strict-equality)
         require(token.balanceOf(owner) == 100, "owner did not recover funds");
     }
@@ -109,20 +89,59 @@ contract AquaOrderVaultTest {
         bytes memory callData = abi.encodeCall(MockSwapRouter.swap, (order, address(token), address(quote), 100, bytes("")));
         address[] memory tokens = new address[](2); tokens[0] = address(quote); tokens[1] = address(token);
         uint256[] memory amounts = new uint256[](2); amounts[0] = 190; amounts[1] = 100;
-        AquaOrderVaultFactory.LifecycleRequest memory request = AquaOrderVaultFactory.LifecycleRequest({ vault: vault, action: 3, strategy: callData, tokens: tokens, amounts: amounts, deadline: block.timestamp + 60 });
-        factory.execute(request, _actionSignature(factory, request, AGENT_KEY, 0));
+        AquaOrderVaultFactory.LifecycleRequest memory request = AquaOrderVaultFactory.LifecycleRequest({ vault: vault, action: 3, strategy: callData, tokens: tokens, amounts: amounts, nonce: bytes32(uint256(3)), deadline: block.timestamp + 60 });
+        factory.execute(request, _actionSignature(factory, request, AGENT_KEY));
         // Deterministic test token and router make exact postconditions appropriate here.
         // forge-lint: disable-next-line(incorrect-strict-equality)
         require(quote.balanceOf(owner) == 200 && token.allowance(address(vault), address(router)) == 0, "unsafe swap result");
     }
 
+    function testArmedReturnFundsPaysLedgerOwnerAndRejectsReplay() external {
+        address owner = vm.addr(OWNER_KEY); address agent = vm.addr(AGENT_KEY);
+        MockVaultToken token = new MockVaultToken();
+        MockAquaOrderBook aqua = new MockAquaOrderBook();
+        AquaOrderVaultFactory factory = new AquaOrderVaultFactory();
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 validUntil = uint64(block.timestamp + 1 days);
+        bytes32 delegation = keccak256(abi.encode(factory.DELEGATION_TYPEHASH(), owner, agent, address(token), uint256(100), uint256(200), uint256(validUntil), uint256(0)));
+        factory.registerDelegation(owner, agent, address(token), 100, 200, validUntil, _signature(OWNER_KEY, _digest(factory.DOMAIN_SEPARATOR(), delegation)));
+        AquaOrderVault vault = factory.deployVault(owner, agent, address(aqua), address(0xA9), address(token), bytes32(uint256(9)));
+        token.mint(address(vault), 100);
+        address[] memory tokens = new address[](1); tokens[0] = address(token);
+        uint256[] memory amounts = new uint256[](0);
+        AquaOrderVaultFactory.LifecycleRequest memory request = AquaOrderVaultFactory.LifecycleRequest({
+            vault: vault, action: 4, strategy: "", tokens: tokens, amounts: amounts, nonce: bytes32(uint256(4)), deadline: block.timestamp + 60
+        });
+        bytes memory signature = _actionSignature(factory, request, AGENT_KEY);
+        factory.execute(request, signature);
+        // forge-lint: disable-next-line(incorrect-strict-equality)
+        require(token.balanceOf(owner) == 100 && token.balanceOf(address(vault)) == 0, "owner did not recover armed funds");
+        bool replayed = false;
+        try factory.execute(request, signature) { replayed = true; } catch { }
+        require(!replayed, "used nonce was accepted twice");
+    }
+
+    function _fundedVault(
+        AquaOrderVaultFactory factory, address owner, address agent, MockAquaOrderBook aqua, MockVaultToken token, bytes32 salt
+    ) private returns (AquaOrderVault vault) {
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 validUntil = uint64(block.timestamp + 1 days);
+        bytes32 delegation = keccak256(abi.encode(
+            factory.DELEGATION_TYPEHASH(), owner, agent, address(token), uint256(100), uint256(200),
+            uint256(validUntil), uint256(0)
+        ));
+        factory.registerDelegation(owner, agent, address(token), 100, 200, validUntil,
+            _signature(OWNER_KEY, _digest(factory.DOMAIN_SEPARATOR(), delegation)));
+        vault = factory.deployVault(owner, agent, address(aqua), address(0xA9), address(token), salt);
+        token.mint(address(vault), 100);
+    }
+
     function _actionSignature(
-        AquaOrderVaultFactory factory, AquaOrderVaultFactory.LifecycleRequest memory request,
-        uint256 key, uint256 nonce
+        AquaOrderVaultFactory factory, AquaOrderVaultFactory.LifecycleRequest memory request, uint256 key
     ) private returns (bytes memory) {
         bytes32 message = keccak256(abi.encode(
             factory.ACTION_TYPEHASH(), address(request.vault), request.action, keccak256(request.strategy),
-            keccak256(abi.encode(request.tokens)), keccak256(abi.encode(request.amounts)), nonce, request.deadline
+            keccak256(abi.encode(request.tokens)), keccak256(abi.encode(request.amounts)), request.nonce, request.deadline
         ));
         return _signature(key, _digest(factory.DOMAIN_SEPARATOR(), message));
     }

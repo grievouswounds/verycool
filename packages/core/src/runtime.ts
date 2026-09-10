@@ -119,6 +119,6 @@ export const localProfileDefaults = Object.freeze({
   keeperLeaseSeconds: 30,
   triggerMinimumBlocks: 1,
   triggerMinimumSeconds: 1,
-  keeperGasLimitCeiling: 1_000_000n,
+  keeperGasLimitCeiling: 8_000_000n,
   keeperMaxFeePerGasCeiling: 100_000_000_000n,
 });
