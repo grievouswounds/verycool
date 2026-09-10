@@ -21,6 +21,7 @@
     "test": "bun test",
     "test:contracts": "cd contracts && forge test --offline",
     "db:migrate": "bun scripts/migrate.ts",
+    "deploy:sepolia": "bun scripts/deploy-sepolia.ts",
     "test:integration": "bun test test/integration",
     "test:protocol": "bun test test/protocol",
     "test:e2e": "e2e",

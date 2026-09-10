@@ -27,4 +27,10 @@ describe("runtime manifest", () => {
   test("rejects stale content", () => {
     expect(() => parseRuntimeManifest(JSON.stringify({ ...manifest, manifestHash: hash("f") }))).toThrow("hash mismatch");
   });
+
+  test("accepts sepolia on chain 11155111 and rejects the Anvil id", () => {
+    const sepolia = runtimeManifestSchema.parse({ ...manifest, profile: "sepolia", chain: { ...manifest.chain, id: 11_155_111 } });
+    expect(sepolia.profile).toBe("sepolia");
+    expect(() => runtimeManifestSchema.parse({ ...manifest, profile: "sepolia" })).toThrow("11155111");
+  });
 });

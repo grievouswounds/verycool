@@ -18,7 +18,7 @@ const tokenSchema = contractSchema.extend({
 
 export const runtimeManifestSchema = z.object({
   schemaVersion: z.literal(1),
-  profile: z.enum(["local-anvil", "production"]),
+  profile: z.enum(["local-anvil", "sepolia", "production"]),
   runId: z.uuid(),
   createdAt: z.iso.datetime({ offset: true }),
   manifestHash: hashSchema.optional(),
@@ -68,6 +68,9 @@ export const runtimeManifestSchema = z.object({
   }
   if (manifest.profile === "local-anvil" && manifest.chain.id !== 31_337) {
     context.addIssue({ code: "custom", message: "local-anvil requires chain 31337", path: ["chain", "id"] });
+  }
+  if (manifest.profile === "sepolia" && manifest.chain.id !== 11_155_111) {
+    context.addIssue({ code: "custom", message: "sepolia requires chain 11155111", path: ["chain", "id"] });
   }
   if (new URL(manifest.auth.origin).hostname !== manifest.auth.rpId) {
     context.addIssue({ code: "custom", message: "WebAuthn origin hostname must equal RP ID", path: ["auth", "rpId"] });

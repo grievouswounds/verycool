@@ -590,6 +590,17 @@
               exec bash "$PWD/scripts/ledger-bootstrap.sh" "$@"
             '';
           };
+          sepoliaDeploy = pkgs.writeShellApplication {
+            name = "sepolia-deploy";
+            runtimeInputs = [
+              aube
+              pkgs.bun
+              pkgs.foundry
+              pkgs.coreutils
+              pkgs.python3
+            ];
+            text = ''exec bash "$PWD/scripts/sepolia-deploy.sh" "$@"'';
+          };
           e2e = pkgs.writeShellApplication {
             name = "e2e";
             runtimeInputs = [
@@ -644,6 +655,7 @@
             startEmulated
             checkLocal
             ledgerBootstrap
+            sepoliaDeploy
             e2e
             e2eBazanticCanary
             e2eAll
@@ -719,6 +731,10 @@
             type = "app";
             program = "${packages.ledgerBootstrap}/bin/ledger-bootstrap";
           };
+          sepolia-deploy = {
+            type = "app";
+            program = "${packages.sepoliaDeploy}/bin/sepolia-deploy";
+          };
           e2e = {
             type = "app";
             program = "${packages.e2e}/bin/e2e";
@@ -767,6 +783,7 @@
           devEmulated = self.packages.${system}.devEmulated;
           startEmulated = self.packages.${system}.startEmulated;
           ledgerBootstrap = self.packages.${system}.ledgerBootstrap;
+          sepoliaDeploy = self.packages.${system}.sepoliaDeploy;
         in
         {
           default = pkgs.mkShell {
@@ -780,6 +797,7 @@
               devEmulated
               startEmulated
               ledgerBootstrap
+              sepoliaDeploy
               self.packages.${system}.checkLocal
               self.packages.${system}.e2e
               self.packages.${system}.e2eBazanticCanary
@@ -820,6 +838,13 @@
                   export AQUA_SPECULOS_BIN=${self.packages.${system}.speculos}/bin/speculos
                   export AQUA_LEDGER_E2E_ASSETS=${self.packages.${system}.ledger-e2e-assets}
                   export AQUA_LEDGER_SECURITY_KEY_SOURCE=${ledger-security-key}
+                  export LD_LIBRARY_PATH=${
+                    pkgs.lib.makeLibraryPath [
+                      pkgs.systemd
+                      pkgs.stdenv.cc.cc.lib
+                      pkgs.libusb1
+                    ]
+                  }''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
                 ''}
               export AQUA_STATE_DIR="''${AQUA_STATE_DIR:-$PWD/.data}"
               export DATABASE_URL="''${DATABASE_URL:-postgresql://aqua:aqua@127.0.0.1:5432/aqua_backend}"
