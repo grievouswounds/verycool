@@ -631,6 +631,28 @@
             ];
             text = ''exec bash "$PWD/scripts/e2e.sh" physical "$@"'';
           };
+          deploy = pkgs.writeShellApplication {
+            name = "deploy";
+            runtimeInputs = [
+              pkgs.bun
+              pkgs.cloudflared
+              pkgs.coreutils
+              pkgs.nix
+            ];
+            text = ''exec bun "$PWD/scripts/deploy-bazantic-gateway.ts" "$@"'';
+          };
+          mcpCheck = pkgs.writeShellApplication {
+            name = "mcp-check";
+            runtimeInputs = [
+              pkgs.bun
+              pkgs.coreutils
+              pkgs.jq
+            ];
+            text = ''
+              export PATH="$PWD/node_modules/.bin:$PATH"
+              exec bun "$PWD/scripts/mcp-check.ts" "$@"
+            '';
+          };
         in
         {
           default = api;
@@ -648,6 +670,8 @@
             e2eBazanticCanary
             e2eAll
             e2ePhysical
+            deploy
+            mcpCheck
             ;
           order-worker = orderWorker;
         }
@@ -735,6 +759,14 @@
             type = "app";
             program = "${packages.e2ePhysical}/bin/e2e-physical";
           };
+          deploy = {
+            type = "app";
+            program = "${packages.deploy}/bin/deploy";
+          };
+          mcp-check = {
+            type = "app";
+            program = "${packages.mcpCheck}/bin/mcp-check";
+          };
         }
       );
 
@@ -785,7 +817,10 @@
               self.packages.${system}.e2eBazanticCanary
               self.packages.${system}.e2eAll
               self.packages.${system}.e2ePhysical
+              self.packages.${system}.deploy
+              self.packages.${system}.mcpCheck
               pkgs.bun
+              pkgs.cloudflared
               # Build-time only: node-hid and usb may invoke node-gyp/prebuild-install.
               pkgs.nodejs
               pkgs.gnumake

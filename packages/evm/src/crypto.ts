@@ -56,10 +56,16 @@ export const recoverTypedDataAddress = (typedData: Eip712TypedData, signature: H
   return addressSchema.parse(VerifyingKey.getAddressOrThrow(key));
 };
 
+export const signPersonalMessage = (key: Hex, message: string): Hex => {
+  initializeCubane();
+  const signature = ZeroHexSigningKey.signMessageOrThrow(key, message);
+  return hexSchema.parse(ZeroHexSignature.fromRsvOrThrow(signature));
+};
+
 export const recoverPersonalAddress = (message: string, signature: Hex): Address => {
   initializeCubane();
-  const key = recoverMessageOrThrow(ZeroHexAsInteger.fromOrThrow(signature), message);
-  return addressSchema.parse(VerifyingKey.getAddressOrThrow(key));
+  const recovered = recoverMessageOrThrow(ZeroHexAsInteger.fromOrThrow(signature), message);
+  return addressSchema.parse(VerifyingKey.getAddressOrThrow(recovered));
 };
 
 export interface AquaIntentAuthorization {

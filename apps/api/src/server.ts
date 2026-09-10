@@ -11,6 +11,7 @@ import type { QuoterService } from "@aqua/quoter";
 import { z, ZodError } from "zod";
 import { docsHtml, openApiDocument } from "./openapi.ts";
 import { swaggerCssResponse, swaggerJavaScriptResponse } from "./swagger.ts";
+import { authorizePageHeaders, authorizePageHtml, htmxResponse, htmlFragment, oauthParameterNames, renderAppErrorFragment, renderSuccessFragment, renderWaitingFragment } from "./authorize.ts";
 
 export interface ServerDependencies {
   readonly trading: TradingService;
@@ -144,27 +145,10 @@ const webauthnFinishAuthenticationSchema=z.object({id:z.uuid(),response:authenti
 const oauthStartSchema=z.object({address:addressSchema,authorization:z.object({client_id:z.string(),redirect_uri:z.url(),resource:z.url(),scope:z.string(),state:z.string(),code_challenge:z.string(),code_challenge_method:z.literal("S256"),response_type:z.literal("code")}).strict()}).strict();
 const oauthCompleteSchema=z.object({id:z.uuid(),response:authenticationResponseSchema}).strict();
 const form=async(request:Request):Promise<URLSearchParams>=>{const media=request.headers.get("content-type")?.split(";",1)[0]?.trim();if(media!=="application/x-www-form-urlencoded")throw new AppError(415,"invalid_request","OAuth token requests must be form encoded");const text=await request.text();if(text.length>16_384)throw new AppError(413,"invalid_request","OAuth form is too large");return new URLSearchParams(text);};
-const authorizeHtml = `<!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Ledger MCP sign-in</title>
-<style>body{font:16px system-ui;max-width:38rem;margin:4rem auto;padding:0 1rem;color:#171717}form{display:grid;gap:1rem}input,button{font:inherit;padding:.75rem}button{cursor:pointer}#status{min-height:1.5rem;color:#444}</style>
-<h1>Ledger MCP sign-in</h1><p>Enter the Ethereum address enrolled with your Ledger FIDO2 credential, then approve the request on the Ledger Security Key app.</p>
-<form id="authorize"><label>Ledger owner address <input id="address" required pattern="0x[0-9a-fA-F]{40}" autocomplete="username"></label><button>Authorize Aqua MCP</button><output id="status"></output></form>
-<script>
-const form=document.querySelector('#authorize'),status=document.querySelector('#status'),button=form.querySelector('button');
-const fromBase64url=value=>Uint8Array.from(atob(value.replace(/-/g,'+').replace(/_/g,'/')),character=>character.charCodeAt(0)).buffer;
-const toBase64url=value=>btoa(String.fromCharCode(...new Uint8Array(value))).replace(/[+]/g,'-').replace(/[/]/g,'_').replace(/=+$/g,'');
-const query=new URLSearchParams(location.search);
-form.addEventListener('submit',async event=>{event.preventDefault();button.disabled=true;status.textContent='Waiting for Ledger…';try{
-  const authorization={};for(const name of ['client_id','redirect_uri','resource','scope','state','code_challenge','code_challenge_method','response_type']){const value=query.get(name);if(value===null)throw new Error('Missing OAuth parameter: '+name);authorization[name]=value;}
-  const started=await fetch('/oauth/authorize/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({address:document.querySelector('#address').value,authorization})});
-  const ceremony=await started.json();if(!started.ok)throw new Error(ceremony.detail||'Could not start Ledger authorization');
-  const publicKey=ceremony.options;publicKey.challenge=fromBase64url(publicKey.challenge);publicKey.allowCredentials=publicKey.allowCredentials.map(item=>({...item,id:fromBase64url(item.id)}));
-  const credential=await navigator.credentials.get({publicKey});if(!(credential instanceof PublicKeyCredential))throw new Error('Ledger did not return a WebAuthn credential');
-  const response={id:credential.id,rawId:toBase64url(credential.rawId),type:credential.type,authenticatorAttachment:credential.authenticatorAttachment,clientExtensionResults:credential.getClientExtensionResults(),response:{clientDataJSON:toBase64url(credential.response.clientDataJSON),authenticatorData:toBase64url(credential.response.authenticatorData),signature:toBase64url(credential.response.signature),userHandle:credential.response.userHandle===null?null:toBase64url(credential.response.userHandle)}};
-  const completed=await fetch('/oauth/authorize/complete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:ceremony.id,response})});const result=await completed.json();if(!completed.ok)throw new Error(result.detail||'Ledger authorization failed');location.assign(result.redirect_uri);
-}catch(error){status.textContent=error instanceof Error?error.message:'Ledger authorization failed';button.disabled=false;}});
-</script></html>`;
+const htmlError = (error: unknown, address: string): Response | null => {
+  if (error instanceof AppError) return htmlFragment(renderAppErrorFragment(error, address));
+  return null;
+};
 
 export const authenticationChallenge = (error: AppError): string | null => {
   if (error.status === 401 && error.type === "urn:aqua:error:authentication") {
@@ -217,7 +201,39 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
     }}),
     "/.well-known/oauth-protected-resource": () => Response.json({resource:dependencies.resource,authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
     "/.well-known/oauth-authorization-server": () => Response.json({issuer:dependencies.issuer,authorization_endpoint:`${dependencies.issuer}/authorize`,token_endpoint:`${dependencies.issuer}/token`,registration_endpoint:`${dependencies.issuer}/register`,response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],code_challenge_methods_supported:["S256"],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
-    "/authorize": new Response(authorizeHtml,{headers:{"content-type":"text/html; charset=utf-8","content-security-policy":"default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'","referrer-policy":"no-referrer","x-content-type-options":"nosniff"}}),
+    "/authorize": new Response(authorizePageHtml,{headers:authorizePageHeaders}),
+    "/authorize/htmx.js": htmxResponse,
+    "/authorize/ceremony": {POST:(request)=>execute(request,async()=>{
+      const fields=await form(request);
+      const address=fields.get("address")??"";
+      try {
+        const input=oauthStartSchema.parse({address,authorization:Object.fromEntries(oauthParameterNames.map((name)=>[name,fields.get(name)??""]))});
+        const ceremony=await dependencies.webauthn.authenticationOptions(input.address);
+        await dependencies.oauth.begin(input.address,input.authorization,ceremony.id);
+        return htmlFragment(renderWaitingFragment(input.address,ceremony));
+      } catch (error: unknown) {
+        const rendered=htmlError(error,address);
+        if(rendered!==null)return rendered;
+        throw error;
+      }
+    },dependencies.corsOrigin)},
+    "/authorize/grant": {POST:(request)=>execute(request,async()=>{
+      const fields=await form(request);
+      try {
+        const assertion=fields.get("response");
+        if(assertion===null)throw new AppError(400,"invalid_request","Assertion response is required");
+        let parsed: unknown;
+        try { parsed = parseStrictJson(assertion); }
+        catch { throw new AppError(400,"invalid_request","Assertion response is required"); }
+        const input=oauthCompleteSchema.parse({id:fields.get("id"),response:parsed});
+        const result=await dependencies.webauthn.authenticate(input.id,input.response);
+        return htmlFragment(renderSuccessFragment(await dependencies.oauth.complete(input.id,result.owner)));
+      } catch (error: unknown) {
+        const rendered=htmlError(error,"");
+        if(rendered!==null)return rendered;
+        throw error;
+      }
+    },dependencies.corsOrigin)},
     "/register": {POST:(request)=>execute(request,async()=>Response.json(await dependencies.oauth.register(await parseJson(request)),{status:201}),dependencies.corsOrigin)},
     "/oauth/authorize/start": {POST:(request)=>execute(request,async()=>{const input=oauthStartSchema.parse(await parseJson(request));const ceremony=await dependencies.webauthn.authenticationOptions(input.address);await dependencies.oauth.begin(input.address,input.authorization,ceremony.id);return Response.json(ceremony);},dependencies.corsOrigin)},
     "/oauth/authorize/complete": {POST:(request)=>execute(request,async()=>{const input=oauthCompleteSchema.parse(await parseJson(request));const assertion=await dependencies.webauthn.authenticate(input.id,input.response);return Response.json({redirect_uri:await dependencies.oauth.complete(input.id,assertion.owner)});},dependencies.corsOrigin)},
@@ -391,8 +407,8 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
   },
   fetch(request) {
     const path = new URL(request.url).pathname;
-    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/v1/capabilities", "/v1/trades", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
-    const postPaths = new Set(["/register","/oauth/authorize/start","/oauth/authorize/complete","/token","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/agents/me/challenges", "/v1/delegations/previews", "/v1/delegations", "/v1/trade-previews", "/v1/trades", "/v1/trade-subscriptions", "/v1/trade-subscriptions/trades/wipe", "/v1/trading", "/v1/quotes/aqua", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
+    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/authorize/htmx.js","/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/v1/capabilities", "/v1/trades", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
+    const postPaths = new Set(["/register","/authorize/ceremony","/authorize/grant","/oauth/authorize/start","/oauth/authorize/complete","/token","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/agents/me/challenges", "/v1/delegations/previews", "/v1/delegations", "/v1/trade-previews", "/v1/trades", "/v1/trade-subscriptions", "/v1/trade-subscriptions/trades/wipe", "/v1/trading", "/v1/quotes/aqua", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
     if (/^\/v1\/erc20-monitor\/subscriptions\/0x[0-9a-fA-F]{40}$/u.test(path)) {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
       response.headers.set("allow", "DELETE");

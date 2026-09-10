@@ -52,7 +52,7 @@ Both `nix develop -c dev` and `nix run .#dev` use API hot reload on the physical
 - `nix develop` installs dependencies with Aube and exposes the complete toolchain without leaving background processes behind. The `dev`/`start` supervisor owns PostgreSQL initialization and migrations. Change dependencies only with Aube (`aube add`, `aube remove`); the lockfile is authoritative and produced by Aube 1.17.
 - Run `aube run check` for strict TypeScript, 100% type coverage, zero-`any` AST inspection, ESLint, tests, dependency policy, and the production bundle.
 - Run `aube run codegen:check` to verify the committed Cubane selector manifest.
-- Enter the reproducible shell with `nix develop`. `aube run dev`, `dev`, and `nix develop -c dev` all launch the physical-Ledger hot-reload stack; `nix develop -c dev-emulated` launches the Speculos stack. `aube run start` and `nix develop -c start` launch the physical stack without hot reload.
+- Enter the reproducible shell with `nix develop`. `aube run dev`, `dev`, and `nix develop -c dev` all launch the physical-Ledger hot-reload stack; `nix develop -c dev-emulated` launches the Speculos stack. `aube run start` and `nix develop -c start` launch the physical stack without hot reload. `aube run deploy` starts that API through `nix develop` when it is not already up, then tunnels it and registers a Bazantic gateway draft.
 
 ### Command reference
 
@@ -91,6 +91,8 @@ aube run codegen                   # regenerate committed Cubane selectors
 aube run codegen:check             # fail when generated selectors are stale
 aube run docs:check                # check OpenAPI/native-route synchronization
 aube run check                     # complete local acceptance suite
+aube run deploy                    # start API via nix if needed, tunnel, register Bazantic draft
+aube run test:mcp                  # headless MCPJam checks against the gateway, stdio bridge, or both
 ```
 
 Nix:
@@ -104,6 +106,10 @@ nix develop -c start               # physical Ledger stack, no hot reload
 nix develop -c start-emulated      # Speculos stack, no hot reload
 nix run .#dev                      # start the physical stack without entering a shell
 nix run .#start                    # start the complete non-hot physical stack
+nix develop -c deploy              # same as aube run deploy (needs live API + baz login)
+nix run .#deploy                   # publish the local API through a quick tunnel
+nix develop -c mcp-check gateway   # headless MCPJam doctor + tools/list against the Bazantic MCP URL
+nix run .#mcp-check                # same checks; pass gateway, bridge, or all
 nix run .#api -- --config /absolute/path/runtime-manifest.json # API only
 nix build .#api                    # build the API launcher
 nix build .#worker                 # build the activity-worker launcher
@@ -202,7 +208,9 @@ The bridge discovers the Bun API's OAuth metadata, registers a loopback client, 
 
 The same isolated LKRP/Cubane signer serves both payment profiles, but they are intentionally different. Aqua trade activation funds the exact Permit2 vault request on the deployment chain (local Anvil is `eip155:31337`) and keeps the local facilitator. Bazantic accepts only exact Base USDC (`eip155:8453`) requirements within the caller's atomic-unit ceiling, which defaults to `10000` (0.01 USDC). Fund the agent address with Anvil gas and sell tokens for local Aqua trades and, independently, with USDC plus gas on Base for Bazantic calls. `wallet-cli` cannot send on Base, so use another reviewed Base-capable funding path.
 
-The Bazantic CLI, hosted grants, and `BAZANTIC_GATEWAY_PRIVATE_KEY` are not runtime dependencies. 1inch Aqua quotes remain local SwapVM `eth_call` simulations; `ONEINCH_API_KEY` enables only optional spot-price endpoints. Publishing this localhost API as a Bazantic provider remains out of scope until it has a public HTTPS endpoint and publicly reachable OpenAPI document.
+The Bazantic CLI, hosted grants, and `BAZANTIC_GATEWAY_PRIVATE_KEY` are not runtime dependencies. 1inch Aqua quotes remain local SwapVM `eth_call` simulations; `ONEINCH_API_KEY` enables only optional spot-price endpoints.
+
+`aube run deploy` (or `nix develop -c deploy`) starts the local API through `nix develop` when `http://127.0.0.1:8787/health/live` is down: `dev` if `.data/keyring` is complete, otherwise `dev-emulated` (override with `AQUA_DEPLOY_STACK`). It leaves `services.apiUrl` on `http://localhost:8787`, opens a free `cloudflared` quick tunnel, mints a SIWE PASETO against Anvil account 0, and runs `baz gateway add` as a draft (`--auth-type api-key`). It writes `.data/bazantic-gateway.json` and a mode-0600 `.data/bazantic-access.token`, then holds the tunnel (and any stack it started) until interrupted. Prerequisites: `baz login` with `gateway:write`, Nix, and `cloudflared` (provided in `nix develop`). Finish in the Bazantic dashboard: bearer delivery of that token, per-method prices, then activate. MCPJam should use the local stdio bridge (`bun apps/mcp-bridge/src/main.ts`, `AQUA_API_URL=http://localhost:8787`, `XDG_STATE_HOME` under `.data/aqua-mcp-state`), not the hosted `{endpointUrl}/mcp` as a tool-calling transport. A SIWE token reaches health, capabilities, OpenAPI, `/v1/trading`, prices, Aqua quotes, and ERC-20 monitor reads; `/v1/trades`, trade previews, delegations, agent binding, and trade subscriptions still require hardware AMR and belong on the local stdio `aqua-mcp` bridge. Quick-tunnel hostnames change on every restart, so each deploy registers a new draft. The generated `{endpointUrl}/mcp` is discovery-only (`tools/list`); ordinary MCP clients cannot settle its `402`, so paid traffic uses `baz curl`. Override `AQUA_API_URL`, `AQUA_TUNNEL_URL`, `AQUA_DEPLOY_SIGNING_KEY`, or `AQUA_DEPLOY_HOLD_TUNNEL=0` when needed.
 
 ## Configuration
 

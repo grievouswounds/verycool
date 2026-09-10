@@ -7,6 +7,19 @@ allowBuilds:
   node-hid: true
   usb: true
 
+trustPolicyExclude:
+  - undici@5.29.0
+
+# @mcpjam/cli pulls ext-apps, whose peer is sdk ^1.29.0. Without this,
+# aube binds that peer to the workspace's pinned 1.12.1 and the CLI crashes on import.
+packageExtensions:
+  '@mcpjam/sdk':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.29.0
+  '@modelcontextprotocol/ext-apps':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.29.0
+
 
 patchedDependencies:
   '@hazae41/cubane@0.3.12': patches/@hazae41+cubane@0.3.12.patch

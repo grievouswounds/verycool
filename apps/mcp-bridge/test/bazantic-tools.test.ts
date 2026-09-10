@@ -37,6 +37,12 @@ describe("Bazantic-backed Aqua MCP catalog", () => {
     expect(new Set(Object.values(result.fingerprints)).size).toBe(1);
   });
 
+  test("accepts createTradeCancellation as the cancel_trade catalog operation", async () => {
+    const names = aliases.map((name) => name === "cancelTrade" ? "createTradeCancellation" : name);
+    const result = await discoverAquaTools({ gatewaySlug: "aqua", catalogUrl, fetch: routedFetch(names) });
+    expect(result.fingerprints.cancel_trade).toHaveLength(64);
+  });
+
   test("fails closed when the generated gateway omits a required operation", async () => {
     await expect(discoverAquaTools({ gatewaySlug: "aqua", catalogUrl, fetch: routedFetch(aliases.slice(0, -1)) }))
       .rejects.toThrow("missing required operation wipe_subscribed_trades");

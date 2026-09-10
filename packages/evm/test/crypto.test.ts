@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { addressSchema, hashSchema, hexSchema } from "@aqua/core";
 import type { Eip712TypedData } from "../src/crypto.ts";
 import {
-  decodeOrder, encodeOrder, encodeX402ExactSettle, hashTypedData, initializeCubane, recoverTypedDataAddress, selector, signTypedData, signingKeyAddress,
+  decodeOrder, encodeOrder, encodeX402ExactSettle, hashTypedData, initializeCubane, recoverPersonalAddress, recoverTypedDataAddress, selector, signPersonalMessage, signTypedData, signingKeyAddress,
 } from "../src/index.ts";
 
 const key = hexSchema.parse(`0x${"0".repeat(63)}1`);
@@ -27,6 +27,13 @@ describe("Cubane EIP-712 signer", () => {
     const signature = signTypedData(key, typedData);
     expect(signature).toHaveLength(132);
     expect(recoverTypedDataAddress(typedData, signature).toLowerCase()).toBe(address.toLowerCase());
+  });
+
+  test("signs and recovers EIP-191 personal messages", () => {
+    const address = signingKeyAddress(key);
+    const signature = signPersonalMessage(key, "Sign in to Aqua Backend");
+    expect(signature).toHaveLength(132);
+    expect(recoverPersonalAddress("Sign in to Aqua Backend", signature).toLowerCase()).toBe(address.toLowerCase());
   });
 });
 

@@ -26,6 +26,8 @@
     "test:e2e": "e2e",
     "test:e2e:bazantic": "e2e-bazantic-canary",
     "test:e2e:all": "e2e-all",
+    "test:mcp": "bun scripts/mcp-check.ts",
+    "deploy": "bun scripts/deploy-bazantic-gateway.ts",
     "type-coverage": "type-coverage --strict --at-least 100",
     "typecheck": "tsc --noEmit && type-coverage --strict --at-least 100"
   },
@@ -45,6 +47,7 @@
     "@x402/core": "2.25.0",
     "@x402/evm": "2.25.0",
     "@x402/mcp": "2.25.0",
+    "htmx.org": "2.0.10",
     "lossless-json": "^4.3.1",
     "paseto-ts": "2.0.6",
     "secure-json-parse": "4.1.0",
@@ -53,6 +56,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@mcpjam/cli": "5.7.1",
     "@types/bun": "1.4.1",
     "@types/node": "26.4.1",
     "eslint": "10.10.0",

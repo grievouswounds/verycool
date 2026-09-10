@@ -38,27 +38,15 @@ const oauthCallbackPort = Number(Bun.env["AQUA_OAUTH_CALLBACK_PORT"] ?? "41739")
 const rpcUrl = Bun.env["AQUA_RPC_URL"] ?? "http://127.0.0.1:8545";
 const previewCachePath = Bun.env["AQUA_PREVIEW_CACHE"] ?? `${stateRoot}/previews.json`;
 const rpc = new JsonRpcClient(new URL(rpcUrl), localProfileDefaults.rpcTimeoutMs);
-const bazanticEvidence = await discoverConfiguredAquaTools();
-if (bazanticEvidence !== null) console.error(JSON.stringify({
-  level: "info", component: "aqua-mcp", message: "Bazantic Aqua tool catalog verified",
-  gatewaySlug: bazanticEvidence.gatewaySlug, mcpUrl: bazanticEvidence.mcpUrl,
-  fingerprints: bazanticEvidence.fingerprints,
-}));
-const accessToken = await oauthAccessToken(apiUrl, oauthCachePath, oauthCallbackPort);
-let agentAddress = Bun.env["AQUA_AGENT_ADDRESS"];
-if (agentAddress === undefined) {
-  try { agentAddress = z.looseObject({ address: addressSchema }).parse(JSON.parse(await readFile(metadataPath, "utf8"))).address; }
-  catch {
-    const provision = Bun.spawn([process.execPath, signerProgram, "provision"], { stdin: "inherit", stdout: "pipe", stderr: "inherit", env: Bun.env });
-    const result = z.looseObject({ address: addressSchema }).parse(JSON.parse(await new Response(provision.stdout).text()));
-    if (await provision.exited !== 0) throw new Error("Ledger Key Ring agent provisioning failed"); agentAddress = result.address;
-  }
+type BridgeConfig = z.infer<typeof configurationSchema>;
+interface Session {
+  readonly accessToken: string;
+  readonly config: BridgeConfig;
+  readonly http: PayingHttpClient;
 }
-const config = configurationSchema.parse({
-  apiUrl, rpcUrl, agent: agentAddress, signerProgram, previewCachePath, oauthCachePath, oauthCallbackPort,
-});
+let sessionPromise: Promise<Session> | undefined;
 
-const signTypedData = async (typedData: Readonly<Record<string, unknown>>): Promise<`0x${string}`> => {
+const signTypedData = async (config: BridgeConfig, typedData: Readonly<Record<string, unknown>>): Promise<`0x${string}`> => {
   const child = Bun.spawn([process.execPath, config.signerProgram, "sign-typed-data"], { stdin: "pipe", stdout: "pipe", stderr: "inherit", env: Bun.env });
   await child.stdin.write(jsonString({ typedData })); await child.stdin.end();
   const text = await new Response(child.stdout).text();
@@ -85,7 +73,7 @@ const output = (body: unknown) => {
   const safe = jsonable(body);
   return { content: [{ type: "text" as const, text: jsonString(safe) }], structuredContent: typeof safe === "object" && safe !== null ? z.record(z.string(), z.unknown()).parse(safe) : { result: safe } };
 };
-const signTransaction = async (transaction: { readonly chainId: number; readonly nonce: bigint; readonly maxPriorityFeePerGas: bigint; readonly maxFeePerGas: bigint; readonly gas: bigint; readonly to: Address; readonly value: bigint; readonly data: Hex }): Promise<Hex> => {
+const signTransaction = async (config: BridgeConfig, transaction: { readonly chainId: number; readonly nonce: bigint; readonly maxPriorityFeePerGas: bigint; readonly maxFeePerGas: bigint; readonly gas: bigint; readonly to: Address; readonly value: bigint; readonly data: Hex }): Promise<Hex> => {
   const child = Bun.spawn([process.execPath, config.signerProgram, "sign-transaction"], { stdin: "pipe", stdout: "pipe", stderr: "inherit", env: Bun.env });
   await child.stdin.write(jsonString({ transaction: {
     chainId: transaction.chainId, to: transaction.to, data: transaction.data,
@@ -108,13 +96,13 @@ const waitForReceipt = async (hash: Hash): Promise<void> => {
   }
   throw new Error(`Prerequisite transaction confirmation timed out: ${hash}`);
 };
-const executePrerequisites = async (preview: Readonly<Record<string, unknown>>): Promise<readonly Hash[]> => {
+const executePrerequisites = async (session: Session, preview: Readonly<Record<string, unknown>>): Promise<readonly Hash[]> => {
   const parsed = prerequisitesSchema.parse(preview["prerequisites"]); const hashes: Hash[] = [];
   for (const transaction of parsed.transactions) {
-    if (transaction.from !== config.agent || transaction.chainId !== preview["chainId"]) throw new Error("Reviewed prerequisite transaction does not belong to the local agent and chain");
-    const [nonce, gasPrice, priority] = await Promise.all([rpc.transactionCount(config.agent), rpc.gasPrice(), rpc.maxPriorityFeePerGas()]);
-    const gas = transaction.gas === undefined ? await rpc.estimateGas({ from: config.agent, to: transaction.to, data: transaction.data, value: transaction.value }) : hexToQuantity(transaction.gas);
-    const raw = await signTransaction({ chainId: transaction.chainId, nonce, maxPriorityFeePerGas: priority, maxFeePerGas: gasPrice * 2n + priority, gas, to: transaction.to, value: hexToQuantity(transaction.value), data: transaction.data });
+    if (transaction.from !== session.config.agent || transaction.chainId !== preview["chainId"]) throw new Error("Reviewed prerequisite transaction does not belong to the local agent and chain");
+    const [nonce, gasPrice, priority] = await Promise.all([rpc.transactionCount(session.config.agent), rpc.gasPrice(), rpc.maxPriorityFeePerGas()]);
+    const gas = transaction.gas === undefined ? await rpc.estimateGas({ from: session.config.agent, to: transaction.to, data: transaction.data, value: transaction.value }) : hexToQuantity(transaction.gas);
+    const raw = await signTransaction(session.config, { chainId: transaction.chainId, nonce, maxPriorityFeePerGas: priority, maxFeePerGas: gasPrice * 2n + priority, gas, to: transaction.to, value: hexToQuantity(transaction.value), data: transaction.data });
     const hash = await rpc.sendRawTransaction(raw); hashes.push(hash); await waitForReceipt(hash);
   }
   return hashes;
@@ -133,15 +121,9 @@ const delegationContextSchema = z.object({
 const delegationPreviewSchema = z.object({ previewId: z.uuid(), previewHash: hashSchema, typedData: z.record(z.string(), z.unknown()) }).loose();
 const delegationSubmissionSchema = z.object({ transactionHash: hashSchema }).loose();
 
-const http = new PayingHttpClient({
-  signer: {
-    address: clientAddressSchema.parse(config.agent),
-    signTypedData: (request) => signTypedData(request),
-  },
-});
-const api = async (path: string, init: RequestInit = {}): Promise<Response> => {
-  const headers = new Headers(init.headers); headers.set("authorization", `Bearer ${accessToken}`);
-  return http.requestPlain(new URL(path, config.apiUrl), { ...init, headers });
+const api = async (session: Session, path: string, init: RequestInit = {}): Promise<Response> => {
+  const headers = new Headers(init.headers); headers.set("authorization", `Bearer ${session.accessToken}`);
+  return session.http.requestPlain(new URL(path, session.config.apiUrl), { ...init, headers });
 };
 const json = async (response: Response): Promise<unknown> => {
   const { body } = await parseHttpJson(response);
@@ -149,7 +131,7 @@ const json = async (response: Response): Promise<unknown> => {
   return body;
 };
 
-const ensureDelegation = async (preview: Readonly<Record<string, unknown>>): Promise<Hash> => {
+const ensureDelegation = async (session: Session, preview: Readonly<Record<string, unknown>>): Promise<Hash> => {
   const context = delegationContextSchema.parse(preview);
   const units = BigInt(context.execution.fundingAmountUnits);
   const decimals = context.tokens.sell.decimals;
@@ -159,84 +141,124 @@ const ensureDelegation = async (preview: Readonly<Record<string, unknown>>): Pro
   const daily = formatTokenAmount(units * 100n, decimals);
   const deadlineMs = context.execution.action === undefined ? Date.now() + 86_400_000 : Number(context.execution.action.deadline) * 1_000;
   const expiresAt = context.delegation?.suggestedExpiresAt ?? new Date(Math.max(deadlineMs + 86_400_000, Date.now() + 86_400_000)).toISOString();
-  const created = delegationPreviewSchema.parse(await json(await api("/v1/delegations/previews", {
+  const created = delegationPreviewSchema.parse(await json(await api(session, "/v1/delegations/previews", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-      agent: config.agent, token: context.normalizedTrade.sellToken, maxPerOrder: amount, maxPerDay: daily,
+      agent: session.config.agent, token: context.normalizedTrade.sellToken, maxPerOrder: amount, maxPerDay: daily,
       expiresAt,
     }),
   })));
   const ownerSignature = await signLedgerTypedData(context.owner, created.typedData);
-  const submitted = delegationSubmissionSchema.parse(await json(await api("/v1/delegations", {
+  const submitted = delegationSubmissionSchema.parse(await json(await api(session, "/v1/delegations", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ previewId: created.previewId, previewHash: created.previewHash, ownerSignature }),
   })));
   await waitForReceipt(submitted.transactionHash); return submitted.transactionHash;
 };
 
-const ensureAgentBinding = async (): Promise<void> => {
-  const challengeResponse = await api("/v1/agents/me/challenges", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agent: config.agent }),
+const ensureAgentBinding = async (session: Session): Promise<void> => {
+  const challengeResponse = await api(session, "/v1/agents/me/challenges", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agent: session.config.agent }),
   });
   const challenge = z.object({ challengeId: z.uuid(), typedData: z.record(z.string(), z.unknown()) }).loose().parse(await json(challengeResponse));
-  const signature = await signTypedData(challenge.typedData);
-  await json(await api("/v1/agents/me", {
+  const signature = await signTypedData(session.config, challenge.typedData);
+  await json(await api(session, "/v1/agents/me", {
     method: "PUT", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ challengeId: challenge.challengeId, agent: config.agent, signature }),
+    body: JSON.stringify({ challengeId: challenge.challengeId, agent: session.config.agent, signature }),
   }));
 };
 
-const loadCache = async (): Promise<Record<string, Readonly<Record<string, unknown>>>> => {
-  try { return z.record(z.string(), z.record(z.string(), z.unknown())).parse(JSON.parse(await readFile(config.previewCachePath, "utf8"))); }
-  catch { return {}; }
-};
-const savePreview = async (body: Readonly<Record<string, unknown>>): Promise<void> => {
-  const id = z.uuid().parse(body["previewId"]); const cache = await loadCache(); cache[id] = body;
-  await mkdir(dirname(config.previewCachePath), { recursive: true, mode: 0o700 });
-  await writeFile(config.previewCachePath, JSON.stringify(cache), { mode: 0o600 });
+const loadOrProvisionAgent = async (): Promise<string> => {
+  const configured = Bun.env["AQUA_AGENT_ADDRESS"];
+  if (configured !== undefined) return configured;
+  try { return z.looseObject({ address: addressSchema }).parse(JSON.parse(await readFile(metadataPath, "utf8"))).address; }
+  catch {
+    const provision = Bun.spawn([process.execPath, signerProgram, "provision"], { stdin: "inherit", stdout: "pipe", stderr: "inherit", env: Bun.env });
+    const result = z.looseObject({ address: addressSchema }).parse(JSON.parse(await new Response(provision.stdout).text()));
+    if (await provision.exited !== 0) throw new Error("Ledger Key Ring agent provisioning failed");
+    return result.address;
+  }
 };
 
-const requestTrade = async (arguments_: unknown) => {
-  const parsed = tradePreviewRequestSchema.parse(arguments_);
-  const response = await api("/v1/trade-previews", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(parsed) });
-  const body = await json(response); if (response.status === 201) await savePreview(z.record(z.string(), z.unknown()).parse(body)); return output(body);
+const ensureSession = (): Promise<Session> => {
+  sessionPromise ??= (async () => {
+    const bazanticEvidence = await discoverConfiguredAquaTools();
+    if (bazanticEvidence !== null) console.error(JSON.stringify({
+      level: "info", component: "aqua-mcp", message: "Bazantic Aqua tool catalog verified",
+      gatewaySlug: bazanticEvidence.gatewaySlug, mcpUrl: bazanticEvidence.mcpUrl,
+      fingerprints: bazanticEvidence.fingerprints,
+    }));
+    const accessToken = await oauthAccessToken(apiUrl, oauthCachePath, oauthCallbackPort);
+    const config = configurationSchema.parse({
+      apiUrl, rpcUrl, agent: await loadOrProvisionAgent(), signerProgram, previewCachePath, oauthCachePath, oauthCallbackPort,
+    });
+    const session: Session = {
+      accessToken,
+      config,
+      http: new PayingHttpClient({
+        signer: {
+          address: clientAddressSchema.parse(config.agent),
+          signTypedData: (request) => signTypedData(config, request),
+        },
+      }),
+    };
+    await ensureAgentBinding(session);
+    return session;
+  })();
+  return sessionPromise;
 };
-const postTrade = async (arguments_: unknown) => {
+
+const loadCache = async (session: Session): Promise<Record<string, Readonly<Record<string, unknown>>>> => {
+  try { return z.record(z.string(), z.record(z.string(), z.unknown())).parse(JSON.parse(await readFile(session.config.previewCachePath, "utf8"))); }
+  catch { return {}; }
+};
+const savePreview = async (session: Session, body: Readonly<Record<string, unknown>>): Promise<void> => {
+  const id = z.uuid().parse(body["previewId"]); const cache = await loadCache(session); cache[id] = body;
+  await mkdir(dirname(session.config.previewCachePath), { recursive: true, mode: 0o700 });
+  await writeFile(session.config.previewCachePath, JSON.stringify(cache), { mode: 0o600 });
+};
+
+const requestTrade = async (session: Session, arguments_: unknown) => {
+  const parsed = tradePreviewRequestSchema.parse(arguments_);
+  const response = await api(session, "/v1/trade-previews", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(parsed) });
+  const body = await json(response); if (response.status === 201) await savePreview(session, z.record(z.string(), z.unknown()).parse(body)); return output(body);
+};
+const postTrade = async (session: Session, arguments_: unknown) => {
   const { previewId, previewHash } = z.object({ previewId: z.uuid(), previewHash: hashSchema }).strict().parse(arguments_);
-  const preview = (await loadCache())[previewId]; if (preview?.["previewHash"] !== previewHash) throw new Error("Reviewed preview is not present in the local cache");
-  const lifecycle = z.record(z.string(), z.unknown()).parse(preview["lifecycle"]); const signature = await signTypedData(lifecycle);
+  const preview = (await loadCache(session))[previewId]; if (preview?.["previewHash"] !== previewHash) throw new Error("Reviewed preview is not present in the local cache");
+  const lifecycle = z.record(z.string(), z.unknown()).parse(preview["lifecycle"]); const signature = await signTypedData(session.config, lifecycle);
   const additional = z.array(z.record(z.string(), z.unknown())).parse(preview["additionalLifecycles"] ?? []);
   const additionalLifecycleSignatures: string[] = [];
-  for (const typed of additional) additionalLifecycleSignatures.push(await signTypedData(typed));
+  for (const typed of additional) additionalLifecycleSignatures.push(await signTypedData(session.config, typed));
   const body = JSON.stringify({ previewId, previewHash, lifecycleSignature: signature, ...(additionalLifecycleSignatures.length === 0 ? {} : { additionalLifecycleSignatures }) });
   const headers = new Headers({ "content-type": "application/json", "idempotency-key": previewId });
-  headers.set("authorization", `Bearer ${accessToken}`);
-  let validation = await api("/v1/trades", { method: "POST", headers, body });
+  headers.set("authorization", `Bearer ${session.accessToken}`);
+  let validation = await api(session, "/v1/trades", { method: "POST", headers, body });
   if (validation.status === 409) {
     const validationResult = await parseHttpJson(validation);
     const error = z.object({ type: z.string() }).loose().safeParse(validationResult.body);
     if (!error.success || error.data.type !== "urn:aqua:error:delegation-required") throw new Error(`Aqua API 409: ${jsonString(validationResult.body)}`);
-    await ensureDelegation(preview); validation = await api("/v1/trades", { method: "POST", headers, body });
+    await ensureDelegation(session, preview); validation = await api(session, "/v1/trades", { method: "POST", headers, body });
   }
   if (validation.status !== 402) return output(await json(validation));
-  const prerequisiteTransactionHashes = await executePrerequisites(preview);
+  const prerequisiteTransactionHashes = await executePrerequisites(session, preview);
   headers.set("aqua-prerequisite-transactions", Buffer.from(JSON.stringify(prerequisiteTransactionHashes)).toString("base64url"));
   const network = `eip155:${chainIdSchema.parse(preview["chainId"])}` as const;
-  const response = await retryAquaPayment(http, validation, new URL("/v1/trades", config.apiUrl), { method: "POST", headers, body }, network);
+  const response = await retryAquaPayment(session.http, validation, new URL("/v1/trades", session.config.apiUrl), { method: "POST", headers, body }, network);
   return output(await json(response));
 };
-const getTrades = async (arguments_: unknown) => {
+const getTrades = async (session: Session, arguments_: unknown) => {
   const parsed = tradesListQuerySchema.parse(arguments_);
   const query = new URLSearchParams(); for (const [key, value] of Object.entries(parsed)) if (value !== undefined) query.set(key, String(value));
-  return output(await json(await api(`/v1/trades?${query.toString()}`)));
+  return output(await json(await api(session, `/v1/trades?${query.toString()}`)));
 };
-const subscription = async (arguments_: unknown, remove: boolean) => { const { address } = z.object({ address: addressSchema }).strict().parse(arguments_); return output(await json(await api(remove ? `/v1/trade-subscriptions/${address}` : "/v1/trade-subscriptions", remove ? { method: "DELETE" } : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }) }))); };
-const wipe = async (arguments_: unknown) => { const parsed = subscribedTradesWipeSchema.parse(arguments_); return output(await json(await api("/v1/trade-subscriptions/trades/wipe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(parsed) }))); };
-const cancelTrade = async (arguments_: unknown) => {
+const subscription = async (session: Session, arguments_: unknown, remove: boolean) => { const { address } = z.object({ address: addressSchema }).strict().parse(arguments_); return output(await json(await api(session, remove ? `/v1/trade-subscriptions/${address}` : "/v1/trade-subscriptions", remove ? { method: "DELETE" } : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }) }))); };
+const wipe = async (session: Session, arguments_: unknown) => { const parsed = subscribedTradesWipeSchema.parse(arguments_); return output(await json(await api(session, "/v1/trade-subscriptions/trades/wipe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(parsed) }))); };
+const cancelTrade = async (session: Session, arguments_: unknown) => {
   const { tradeId } = z.object({ tradeId: z.uuid() }).strict().parse(arguments_);
   const created = z.object({ cancellationId: z.uuid(), cancellationHash: hashSchema, lifecycle: z.record(z.string(), z.unknown()) }).loose()
-    .parse(await json(await api(`/v1/trades/${tradeId}/cancellations`, { method: "POST" })));
-  const signature = await signTypedData(created.lifecycle);
-  return output(await json(await api(`/v1/trades/${tradeId}/cancellations/${created.cancellationId}`, {
+    .parse(await json(await api(session, `/v1/trades/${tradeId}/cancellations`, { method: "POST" })));
+  const signature = await signTypedData(session.config, created.lifecycle);
+  return output(await json(await api(session, `/v1/trades/${tradeId}/cancellations/${created.cancellationId}`, {
     method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ signature }),
   })));
 };
@@ -260,19 +282,19 @@ server.setRequestHandler(ListToolsRequestSchema, () => Promise.resolve({ tools }
 /* type-coverage:ignore-next-line -- request schema inference is untyped upstream across the Zod major-version boundary. */
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
+    const session = await ensureSession();
     const arguments_: unknown = request.params.arguments ?? {};
-    if (request.params.name === "request_trade") return requestTrade(arguments_);
-    if (request.params.name === "post_trade") return postTrade(arguments_);
-    if (request.params.name === "get_trades") return getTrades(arguments_);
-    if (request.params.name === "cancel_trade") return cancelTrade(arguments_);
-    if (request.params.name === "subscribe_to_user") return subscription(arguments_, false);
-    if (request.params.name === "unsubscribe_from_user") return subscription(arguments_, true);
-    if (request.params.name === "wipe_subscribed_trades") return wipe(arguments_);
+    if (request.params.name === "request_trade") return requestTrade(session, arguments_);
+    if (request.params.name === "post_trade") return postTrade(session, arguments_);
+    if (request.params.name === "get_trades") return getTrades(session, arguments_);
+    if (request.params.name === "cancel_trade") return cancelTrade(session, arguments_);
+    if (request.params.name === "subscribe_to_user") return subscription(session, arguments_, false);
+    if (request.params.name === "unsubscribe_from_user") return subscription(session, arguments_, true);
+    if (request.params.name === "wipe_subscribed_trades") return wipe(session, arguments_);
     throw new Error("Unknown tool");
   } catch (error) {
     console.error(error);
     throw error;
   }
 });
-await ensureAgentBinding();
 await server.connect(new StdioServerTransport());

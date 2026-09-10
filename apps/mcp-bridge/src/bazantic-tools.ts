@@ -2,17 +2,17 @@ import { createHash } from "node:crypto";
 import { BazanticCatalogClient, discoverGatewayTools } from "@aqua/bazantic";
 import { z } from "zod";
 
-const requiredTools = {
+export const requiredAquaTools = {
   request_trade: ["request_trade", "requestTrade"],
   post_trade: ["post_trade", "postTrade"],
   get_trades: ["get_trades", "getTrades"],
-  cancel_trade: ["cancel_trade", "cancelTrade"],
+  cancel_trade: ["cancel_trade", "cancelTrade", "createTradeCancellation"],
   subscribe_to_user: ["subscribe_to_user", "subscribeToUser"],
   unsubscribe_from_user: ["unsubscribe_from_user", "unsubscribeFromUser"],
   wipe_subscribed_trades: ["wipe_subscribed_trades", "wipeSubscribedTrades"],
 } as const;
 
-export type AquaMcpToolName = keyof typeof requiredTools;
+export type AquaMcpToolName = keyof typeof requiredAquaTools;
 export interface BazanticToolEvidence {
   readonly gatewaySlug: string;
   readonly gatewayName: string;
@@ -67,13 +67,13 @@ export const discoverAquaTools = async (options: BazanticToolDiscoveryOptions): 
     return schemaFingerprint(tool.inputSchema);
   };
   const fingerprints:Record<AquaMcpToolName,string> = {
-    request_trade:fingerprint("request_trade",requiredTools.request_trade),
-    post_trade:fingerprint("post_trade",requiredTools.post_trade),
-    get_trades:fingerprint("get_trades",requiredTools.get_trades),
-    cancel_trade:fingerprint("cancel_trade",requiredTools.cancel_trade),
-    subscribe_to_user:fingerprint("subscribe_to_user",requiredTools.subscribe_to_user),
-    unsubscribe_from_user:fingerprint("unsubscribe_from_user",requiredTools.unsubscribe_from_user),
-    wipe_subscribed_trades:fingerprint("wipe_subscribed_trades",requiredTools.wipe_subscribed_trades),
+    request_trade:fingerprint("request_trade",requiredAquaTools.request_trade),
+    post_trade:fingerprint("post_trade",requiredAquaTools.post_trade),
+    get_trades:fingerprint("get_trades",requiredAquaTools.get_trades),
+    cancel_trade:fingerprint("cancel_trade",requiredAquaTools.cancel_trade),
+    subscribe_to_user:fingerprint("subscribe_to_user",requiredAquaTools.subscribe_to_user),
+    unsubscribe_from_user:fingerprint("unsubscribe_from_user",requiredAquaTools.unsubscribe_from_user),
+    wipe_subscribed_trades:fingerprint("wipe_subscribed_trades",requiredAquaTools.wipe_subscribed_trades),
   };
   return {
     gatewaySlug,
