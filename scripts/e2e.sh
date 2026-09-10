@@ -300,6 +300,8 @@ else
 fi
 if ! AQUA_E2E_REPORT="$root/reports/e2e/mcp.json" bun "$root/test/e2e/mcp-full-flow.ts"; then
   echo "MCP full flow failed; API, worker, and Security Key Speculos follow" >&2
+  mkdir -p "$root/reports/e2e/logs"
+  cp "$work/order-worker.log" "$work/api.log" "$work/anvil.log" "$root/reports/e2e/logs/" 2>/dev/null || true
   curl -sS "http://127.0.0.1:5002/events?currentscreenonly=true" >&2 || true
   tail -n 80 "$work/speculos/security-key.log" >&2 || true
   tail -n 80 "$work/facilitator.log" >&2 || true

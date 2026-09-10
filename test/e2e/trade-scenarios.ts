@@ -153,7 +153,7 @@ export const runTradeScenarios = async (call: McpCall): Promise<readonly Scenari
     amount: { side: "sell", value: "1" },
     policy: { kind: "stopMarket", triggerPrice: "0.0008", slippageBps: "50", timeInForce: "ioc" },
   }, { disposition: "conditional" });
-  await waitStatus(call, stopFire.submitted.tradeId, ["armed"]);
+  await waitStatus(call, stopFire.submitted.tradeId, ["armed", "broadcast"]);
   await lowerUsdEthBid();
   await waitForWorker();
   const stopFired = await waitStatus(call, stopFire.submitted.tradeId, ["broadcast"]);
@@ -169,7 +169,7 @@ export const runTradeScenarios = async (call: McpCall): Promise<readonly Scenari
     amount: { side: "sell", value: "1" },
     policy: { kind: "takeProfitMarket", triggerPrice: "0.002", slippageBps: "50", timeInForce: "ioc" },
   }, { disposition: "conditional" });
-  await waitStatus(call, takeProfit.submitted.tradeId, ["armed"]);
+  await waitStatus(call, takeProfit.submitted.tradeId, ["armed", "broadcast"]);
   await raiseUsdEthBid();
   await waitForWorker();
   const tpFired = await waitStatus(call, takeProfit.submitted.tradeId, ["broadcast"]);
@@ -185,7 +185,7 @@ export const runTradeScenarios = async (call: McpCall): Promise<readonly Scenari
     amount: { side: "sell", value: "1" },
     policy: { kind: "oco", takeProfitPrice: "0.002", stopLossPrice: "0.0005" },
   }, { disposition: "conditional" });
-  await waitStatus(call, oco.submitted.tradeId, ["armed"]);
+  await waitStatus(call, oco.submitted.tradeId, ["armed", "broadcast"]);
   await raiseUsdEthBid();
   await waitForWorker();
   const ocoFired = await waitStatus(call, oco.submitted.tradeId, ["broadcast"]);

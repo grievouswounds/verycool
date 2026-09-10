@@ -10,6 +10,8 @@ contract AquaIntentController {
     );
     bytes32 public immutable DOMAIN_SEPARATOR;
     address public immutable operator;
+    address public immutable deployer;
+    address public matcher;
     uint64 public immutable minimumDelay;
     uint64 public immutable minimumBlocks;
 
@@ -33,10 +35,12 @@ contract AquaIntentController {
     event TriggerObserved(bytes32 indexed intentHash, bytes32 proofHash, uint64 blockNumber, uint64 timestamp);
     event TriggerReset(bytes32 indexed intentHash);
     event TriggerActivated(bytes32 indexed intentHash, bytes32 indexed group);
+    event MatcherBound(address matcher);
 
     constructor(address operator_, uint64 minimumBlocks_, uint64 minimumDelay_) {
         if (operator_ == address(0)) revert Unauthorized();
         operator = operator_;
+        deployer = msg.sender;
         minimumBlocks = minimumBlocks_;
         minimumDelay = minimumDelay_;
         DOMAIN_SEPARATOR = keccak256(abi.encode(
@@ -85,8 +89,15 @@ contract AquaIntentController {
         }
     }
 
+    function bindMatcher(address matcher_) external {
+        if (msg.sender != deployer) revert Unauthorized();
+        if (matcher != address(0) || matcher_ == address(0)) revert Unauthorized();
+        matcher = matcher_;
+        emit MatcherBound(matcher_);
+    }
+
     function activate(bytes32 intentHash, bytes32 group, bytes32 proofHash) external {
-        if (msg.sender != operator) revert Unauthorized();
+        if (msg.sender != operator && msg.sender != matcher) revert Unauthorized();
         if (closedGroups[group]) revert GroupClosed();
         Observation memory current = observations[intentHash];
         if (

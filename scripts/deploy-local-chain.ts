@@ -142,6 +142,7 @@ const assertDeploymentBindings = async (contracts: z.infer<typeof contractsSchem
     if (!sameAddress(await castCall(router, "AQUA()(address)"), contracts.aqua.address)) throw new Error(`Router ${router} has the wrong Aqua binding`);
   }
   if (!sameAddress(await castCall(contracts.intentController.address, "operator()(address)"), identity.keeper)) throw new Error("Intent controller operator does not match broker keeper");
+  if (!sameAddress(await castCall(contracts.intentController.address, "matcher()(address)"), contracts.boundedMatcher.address)) throw new Error("Intent controller matcher is not bound to the bounded matcher");
   if (!sameAddress(await castCall(contracts.boundedMatcher.address, "operator()(address)"), identity.keeper)) throw new Error("Bounded matcher operator does not match broker keeper");
   for (const router of [contracts.aquaSwapRouter.address, contracts.limitSwapRouter.address]) {
     if (await castCall(contracts.boundedMatcher.address, "allowed(address,bytes4)(bool)", [router, SWAP_SELECTOR]) !== "true") throw new Error(`Bounded matcher does not allow swap on ${router}`);
@@ -264,6 +265,7 @@ const boundedMatcher = await forgeCreate({
     `[${SWAP_SELECTOR},${SWAP_SELECTOR},${ACTIVATE_SELECTOR},${OBSERVE_SELECTOR},${FACTORY_EXECUTE_SELECTOR}]`,
   ],
 });
+await castSend(intentController.address, "bindMatcher(address)", [boundedMatcher.address]);
 
 const contracts = { aqua, aquaSwapRouter, limitSwapRouter, wrappedNativeToken: weth, intentController, orderVaultFactory, boundedMatcher, permit2, x402ExactPermit2Proxy };
 const verifiedContracts = contractsSchema.parse(contracts);
