@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { addressSchema, hashSchema, hexSchema, runtimeManifestHash, runtimeManifestSchema } from "@aqua/core";
 import type { RuntimeManifest } from "@aqua/core";
-import { initializeCubane, JsonRpcClient, keccakHex, hexToBytes } from "@aqua/evm";
+import { initializeCubane, createPooledRpcClient, keccakHex, hexToBytes } from "@aqua/evm";
 import { z } from "zod";
 
 const argument = (name: string): string => {
@@ -75,7 +75,7 @@ const callAllowed = async (matcher: string, target: string, allowedSelector: str
 
 const input = inputSchema.parse(await Bun.file(argument("--deployments")).json());
 initializeCubane();
-const rpc = new JsonRpcClient(rpcUrl, 10_000);
+const rpc = createPooledRpcClient({ id: 31_337, rpcUrl: rpcUrl.toString() }, 10_000);
 const chainId = await rpc.chainId();
 if (chainId !== 31_337) throw new Error(`Expected Anvil chain 31337, received ${String(chainId)}`);
 const genesis = blockSchema.parse(await request("eth_getBlockByNumber", ["0x0", false]));

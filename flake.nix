@@ -245,6 +245,28 @@
         nixpkgs.lib.concatMapStringsSep "\n" (line: if line == "" then "" else pad + line) (
           nixpkgs.lib.splitString "\n" text
         );
+      ledgerDispatch =
+        pkgs: name: defaultMode: physicalBin: physicalName: emulatedBin: emulatedName:
+        pkgs.writeShellApplication {
+          inherit name;
+          runtimeInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            physicalBin
+            emulatedBin
+          ];
+          text = ''
+            # shellcheck disable=SC1091
+            source "$PWD/scripts/ledger-mode.sh"
+            aqua_consume_ledger_args --default ${defaultMode} "$@" || exit
+            set -- "''${AQUA_LEDGER_REST[@]}"
+            aqua_apply_ledger_env
+            if [[ "$AQUA_LEDGER" == emulator ]]; then
+              exec ${emulatedBin}/bin/${emulatedName} "$@"
+            fi
+            exec ${physicalBin}/bin/${physicalName} "$@"
+          '';
+        };
       devStack =
         pkgs: aube: aqua: swapvm: x402: permit2: commandName: hotReload: ledgerMode:
         let
@@ -557,10 +579,14 @@
           api = appProgram pkgs "aqua-api" "apps/api/src/main.ts";
           worker = appProgram pkgs "aqua-activity-worker" "apps/worker/src/main.ts";
           orderWorker = appProgram pkgs "aqua-order-worker" "apps/order-worker/src/main.ts";
-          dev = devStack pkgs aube aqua swapvm x402 permit2 "dev" true "physical";
-          start = devStack pkgs aube aqua swapvm x402 permit2 "aqua-start" false "physical";
+          devPhysical = devStack pkgs aube aqua swapvm x402 permit2 "dev-physical" true "physical";
+          startPhysical = devStack pkgs aube aqua swapvm x402 permit2 "aqua-start-physical" false "physical";
           devEmulated = devStack pkgs aube aqua swapvm x402 permit2 "dev-emulated" true "emulated";
           startEmulated = devStack pkgs aube aqua swapvm x402 permit2 "start-emulated" false "emulated";
+          dev = ledgerDispatch pkgs "dev" "physical" devPhysical "dev-physical" devEmulated "dev-emulated";
+          start =
+            ledgerDispatch pkgs "aqua-start" "physical" startPhysical "aqua-start-physical" startEmulated
+              "start-emulated";
           checkLocal = pkgs.writeShellApplication {
             name = "check-local";
             runtimeInputs = [
@@ -635,11 +661,13 @@
             name = "deploy";
             runtimeInputs = [
               pkgs.bun
-              pkgs.cloudflared
               pkgs.coreutils
               pkgs.nix
             ];
-            text = ''exec bun "$PWD/scripts/deploy-bazantic-gateway.ts" "$@"'';
+            text = ''
+              export PATH="$PWD/node_modules/.bin:$PATH"
+              exec bun "$PWD/scripts/deploy-bazantic-gateway.ts" "$@"
+            '';
           };
           mcpCheck = pkgs.writeShellApplication {
             name = "mcp-check";
@@ -662,6 +690,8 @@
             worker
             dev
             start
+            devPhysical
+            startPhysical
             devEmulated
             startEmulated
             checkLocal
@@ -820,9 +850,8 @@
               self.packages.${system}.deploy
               self.packages.${system}.mcpCheck
               pkgs.bun
-              pkgs.cloudflared
-              # Build-time only: node-hid and usb may invoke node-gyp/prebuild-install.
               pkgs.nodejs
+              # Build-time only: node-hid and usb may invoke node-gyp/prebuild-install.
               pkgs.gnumake
               pkgs.jq
               pkgs.git

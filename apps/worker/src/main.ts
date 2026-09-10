@@ -3,14 +3,14 @@ import { rm } from "node:fs/promises";
 import { ActivityCollector, RpcActivityChain } from "@aqua/activity";
 import { PostgresActivityRepository, createDatabase, closeDatabase } from "@aqua/adapters";
 import { loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
-import { initializeCubane, JsonRpcClient } from "@aqua/evm";
+import { initializeCubane, createPooledRpcClient } from "@aqua/evm";
 
 const manifest=await loadRuntimeManifest(Bun.argv);const defaults=localProfileDefaults;
 const readyIndex=Bun.argv.indexOf("--ready-out");const readyOut=readyIndex<0?null:Bun.argv[readyIndex+1]??null;
 initializeCubane();
 const database=createDatabase(manifest.services.databaseUrl);await database.connect();
 const repository=new PostgresActivityRepository(database);await repository.initialize();
-const collector=new ActivityCollector(repository,new RpcActivityChain(new JsonRpcClient(new URL(manifest.chain.rpcUrl),defaults.rpcTimeoutMs)),{confirmations:BigInt(manifest.indexer.confirmations),blockChunkSize:BigInt(defaults.activityBlockChunkSize),subscriptionBatchSize:defaults.activityScanConcurrency});
+const collector=new ActivityCollector(repository,new RpcActivityChain(createPooledRpcClient(manifest.chain,defaults.rpcTimeoutMs)),{confirmations:BigInt(manifest.indexer.confirmations),blockChunkSize:BigInt(defaults.activityBlockChunkSize),subscriptionBatchSize:defaults.activityScanConcurrency});
 console.log(JSON.stringify({level:"info",component:"activity-worker",manifestHash:runtimeManifestHash(manifest)}));
 const holder=randomUUID();let stopped=false;let timer:ReturnType<typeof setTimeout>|undefined;
 const tick=async():Promise<void>=>{const now=new Date();const until=new Date(now.getTime()+defaults.activityWorkerLeaseSeconds*1_000);if(await repository.acquireLease("erc20-activity",holder,now,until))await collector.runOnce();};

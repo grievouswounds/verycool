@@ -4,6 +4,7 @@ import type { Address, Hash, Hex, RpcBlock, RpcCall, RpcLog, RpcLogFilter, RpcPo
 import { selector } from "./hex.ts";
 import { decodeString, decodeUint256 } from "./abi.ts";
 import { hexToQuantity, quantityToHex } from "./hex.ts";
+import { classifyHttp, classifyJsonRpc, classifyTransport, ClassifiedRpcError } from "./normalize.ts";
 
 const rpcSuccessSchema = z.object({ jsonrpc: z.literal("2.0"), id: z.number(), result: z.unknown() }).strict();
 const rpcFailureSchema = z.object({
@@ -18,25 +19,32 @@ const rawLogSchema = z.object({
 }).loose();
 const rawReceiptSchema = z.object({ transactionHash: hashSchema, blockNumber: quantitySchema, status: z.enum(["0x0", "0x1"]) }).loose().nullable();
 
-type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-export class JsonRpcClient implements RpcPort {
+export interface RpcRequestOptions {
+  readonly requiresStateOverrides?: boolean;
+  readonly requiresHeight?: bigint;
+  readonly maxLogSpan?: bigint;
+  readonly kind?: "read" | "broadcast";
+}
+
+export interface RpcTransport {
+  request(method: string, params: readonly unknown[], options?: RpcRequestOptions): Promise<unknown>;
+}
+
+export class HttpRpcTransport implements RpcTransport {
   private requestId = 0;
   private readonly url: URL;
   private readonly timeoutMs: number;
   private readonly fetcher: Fetch;
 
-  public constructor(
-    url: URL,
-    timeoutMs: number,
-    fetcher: Fetch = fetch,
-  ) {
+  public constructor(url: URL, timeoutMs: number, fetcher: Fetch = fetch) {
     this.url = url;
     this.timeoutMs = timeoutMs;
     this.fetcher = fetcher;
   }
 
-  private async request(method: string, params: readonly unknown[]): Promise<unknown> {
+  public async request(method: string, params: readonly unknown[]): Promise<unknown> {
     const id = ++this.requestId;
     let response: Response;
     try {
@@ -47,30 +55,61 @@ export class JsonRpcClient implements RpcPort {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (cause: unknown) {
-      throw upstreamError(cause instanceof Error ? cause.message : "RPC transport failed");
+      throw classifyTransport(cause);
     }
-    if (!response.ok) throw upstreamError(`RPC returned HTTP ${String(response.status)}`);
+    if (!response.ok) {
+      let bodyMessage: string | undefined;
+      try {
+        const failed = rpcFailureSchema.safeParse(JSON.parse(await response.text()) as unknown);
+        if (failed.success) bodyMessage = failed.data.error.message;
+      } catch {
+        bodyMessage = undefined;
+      }
+      throw classifyHttp(response.status, response.headers.get("retry-after"), bodyMessage);
+    }
     const declared = response.headers.get("content-length");
     if (declared !== null && (!/^(?:0|[1-9][0-9]{0,7})$/u.test(declared) || Number(declared) > 1_048_576)) {
-      throw upstreamError("RPC response Content-Length is invalid or too large");
+      throw classifyTransport(new Error("RPC response Content-Length is invalid or too large"));
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.length > 1_048_576) throw upstreamError("RPC response exceeds 1 MiB");
+    if (bytes.length > 1_048_576) throw classifyTransport(new Error("RPC response exceeds 1 MiB"));
     let text: string;
     try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-    catch { throw upstreamError("RPC response is not valid UTF-8"); }
+    catch { throw classifyTransport(new Error("RPC response is not valid UTF-8")); }
     let body: unknown;
     try { body = JSON.parse(text) as unknown; }
-    catch { throw upstreamError("RPC response is not valid JSON"); }
+    catch { throw classifyTransport(new Error("RPC response is not valid JSON")); }
     const failed = rpcFailureSchema.safeParse(body);
     if (failed.success) {
-      const data = failed.data.error.data;
-      const detail = typeof data === "string" && data.length > 0 ? ` data=${data}` : "";
-      throw upstreamError(`RPC ${String(failed.data.error.code)}: ${failed.data.error.message}${detail}`);
+      throw classifyJsonRpc(method, params, failed.data.error.code, failed.data.error.message, failed.data.error.data);
     }
     const parsed = rpcSuccessSchema.safeParse(body);
-    if (!parsed.success || parsed.data.id !== id) throw upstreamError("Malformed or mismatched RPC response");
+    if (!parsed.success || parsed.data.id !== id) throw classifyTransport(new Error("Malformed or mismatched RPC response"));
     return parsed.data.result;
+  }
+}
+
+export class JsonRpcClient implements RpcPort {
+  private readonly transport: RpcTransport;
+
+  public constructor(transport: RpcTransport);
+  public constructor(url: URL, timeoutMs: number, fetcher?: Fetch);
+  public constructor(urlOrTransport: URL | RpcTransport, timeoutMs?: number, fetcher: Fetch = fetch) {
+    if (urlOrTransport instanceof URL) {
+      if (timeoutMs === undefined) throw new Error("RPC timeout is required");
+      this.transport = new HttpRpcTransport(urlOrTransport, timeoutMs, fetcher);
+    } else {
+      this.transport = urlOrTransport;
+    }
+  }
+
+  protected async request(method: string, params: readonly unknown[], options?: RpcRequestOptions): Promise<unknown> {
+    try {
+      return await this.transport.request(method, params, options);
+    } catch (cause: unknown) {
+      if (cause instanceof ClassifiedRpcError) throw upstreamError(cause.message);
+      throw cause;
+    }
   }
 
   public async chainId(): Promise<number> {
@@ -87,13 +126,17 @@ export class JsonRpcClient implements RpcPort {
   public async call(transaction: RpcCall, overrides?: RpcStateOverrides): Promise<Hex> {
     const params: unknown[] = [this.toRpcTransaction(transaction), "latest"];
     if (overrides !== undefined) params.push(this.toRpcOverrides(overrides));
-    return hexSchema.parse(await this.request("eth_call", params));
+    return hexSchema.parse(await this.request("eth_call", params, {
+      requiresStateOverrides: overrides !== undefined,
+    }));
   }
 
   public async estimateGas(transaction: RpcCall, overrides?: RpcStateOverrides): Promise<bigint> {
     const params: unknown[] = [this.toRpcTransaction(transaction)];
     if (overrides !== undefined) params.push("latest", this.toRpcOverrides(overrides));
-    return hexToQuantity(quantitySchema.parse(await this.request("eth_estimateGas", params)));
+    return hexToQuantity(quantitySchema.parse(await this.request("eth_estimateGas", params, {
+      requiresStateOverrides: overrides !== undefined,
+    })));
   }
 
   public async tokenDecimals(address: Address): Promise<number> {
@@ -125,7 +168,9 @@ export class JsonRpcClient implements RpcPort {
   }
 
   public async block(number: bigint): Promise<RpcBlock> {
-    const parsed = rawBlockSchema.parse(await this.request("eth_getBlockByNumber", [quantityToHex(number), false]));
+    const parsed = rawBlockSchema.parse(await this.request("eth_getBlockByNumber", [quantityToHex(number), false], {
+      requiresHeight: number,
+    }));
     return { number: hexToQuantity(parsed.number), hash: parsed.hash, timestamp: hexToQuantity(parsed.timestamp) };
   }
 
@@ -134,7 +179,11 @@ export class JsonRpcClient implements RpcPort {
       fromBlock: quantityToHex(filter.fromBlock), toBlock: quantityToHex(filter.toBlock), topics: filter.topics,
     };
     if (filter.address !== undefined) requestFilter["address"] = filter.address;
-    const raw = z.array(rawLogSchema).parse(await this.request("eth_getLogs", [requestFilter]));
+    const span = filter.toBlock >= filter.fromBlock ? filter.toBlock - filter.fromBlock : 0n;
+    const raw = z.array(rawLogSchema).parse(await this.request("eth_getLogs", [requestFilter], {
+      requiresHeight: filter.toBlock,
+      maxLogSpan: span,
+    }));
     return raw.map((item) => ({
       address: item.address, blockNumber: hexToQuantity(item.blockNumber), blockHash: item.blockHash,
       transactionHash: item.transactionHash, logIndex: hexToQuantity(item.logIndex),
@@ -159,7 +208,7 @@ export class JsonRpcClient implements RpcPort {
   }
 
   public async sendRawTransaction(transaction: Hex): Promise<Hash> {
-    return hashSchema.parse(await this.request("eth_sendRawTransaction", [transaction]));
+    return hashSchema.parse(await this.request("eth_sendRawTransaction", [transaction], { kind: "broadcast" }));
   }
 
   public async transactionReceipt(hash: Hash): Promise<RpcReceipt | null> {

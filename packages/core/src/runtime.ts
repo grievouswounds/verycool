@@ -100,8 +100,14 @@ export const runtimeManifestPath = (arguments_: readonly string[]): string => {
   return path;
 };
 
-export const loadRuntimeManifest = async (arguments_: readonly string[]): Promise<RuntimeManifest> =>
-  parseRuntimeManifest(await Bun.file(runtimeManifestPath(arguments_)).text());
+export const loadRuntimeManifest = async (arguments_: readonly string[]): Promise<RuntimeManifest> => {
+  const index = arguments_.indexOf("--config");
+  const path = index < 0 ? undefined : arguments_[index + 1];
+  if (path !== undefined && path.length > 0) return parseRuntimeManifest(await Bun.file(path).text());
+  const encoded = Bun.env["AQUA_RUNTIME_MANIFEST"]?.trim();
+  if (encoded !== undefined && encoded.length > 0) return parseRuntimeManifest(encoded);
+  throw new Error("Usage: --config <runtime-manifest.json> or set AQUA_RUNTIME_MANIFEST");
+};
 
 export const localProfileDefaults = Object.freeze({
   rpcTimeoutMs: 10_000,

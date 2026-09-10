@@ -39,8 +39,9 @@ reports/
 .env copy*
 !.env.example
 
-# Local service state
-.data/
+# Generated deploy artifacts
+out/
+
 .state/
 tmp/
 .tmp/
@@ -58,3 +59,5 @@ result-*
 .vscode/
 *.swp
 *~
+.vercel
+.env*

@@ -56,6 +56,7 @@ export interface RpcPort {
   maxPriorityFeePerGas(): Promise<bigint>;
   sendRawTransaction(transaction: Hex): Promise<Hash>;
   transactionReceipt(hash: Hash): Promise<RpcReceipt | null>;
+  session?(): RpcPort;
 }
 
 export interface RpcReceipt { readonly transactionHash: Hash; readonly blockNumber: bigint; readonly status: "success" | "reverted" }

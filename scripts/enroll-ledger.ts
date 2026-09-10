@@ -1,7 +1,10 @@
 #!/usr/bin/env bun
 import { addressSchema } from "@aqua/core";
 import { z } from "zod";
+import { applyLedgerArgv } from "./ledger-mode.ts";
 import { ledgerOwnerAddress, signLedgerMessage } from "../apps/mcp-bridge/src/ledger.ts";
+
+applyLedgerArgv(Bun.argv.slice(2));
 
 const fail = (message: string): never => {
   console.error(message);

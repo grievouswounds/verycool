@@ -33,27 +33,28 @@ export class Keeper {
     if (job === null) return;
     try {
       this.validate(job);
+      const rpc = this.rpc.session?.() ?? this.rpc;
       if (job.state === "submitted" && job.transactionHash !== undefined) {
-        const receipt = await this.rpc.transactionReceipt(job.transactionHash);
+        const receipt = await rpc.transactionReceipt(job.transactionHash);
         if (receipt?.status === "success") { await this.repository.markComplete(job.id, worker, receipt.blockNumber); return; }
         if (receipt?.status === "reverted") { await this.repository.markFailed(job.id, worker, "Keeper transaction reverted"); return; }
         if (job.submittedAt !== undefined && now.getTime() - job.submittedAt.getTime() < this.config.replacementSeconds * 1_000) return;
       }
-      const nonce = job.nonce ?? await this.rpc.transactionCount(this.signer.address);
-      const priority = await this.rpc.maxPriorityFeePerGas();
-      const networkFee = await this.rpc.gasPrice();
+      const nonce = job.nonce ?? await rpc.transactionCount(this.signer.address);
+      const priority = await rpc.maxPriorityFeePerGas();
+      const networkFee = await rpc.gasPrice();
       const previous = job.maxFeePerGas ?? 0n;
       const replacement = previous === 0n ? 0n : previous + (previous + 7n) / 8n;
       const maxFeePerGas = networkFee * 2n + priority > replacement ? networkFee * 2n + priority : replacement;
       if (maxFeePerGas > this.config.maxFeePerGas) throw new Error("Keeper fee ceiling exceeded");
-      const estimated = await this.rpc.estimateGas({ to: job.target, from: this.signer.address, data: job.data, value: quantitySchema.parse(`0x${job.value.toString(16)}`) });
+      const estimated = await rpc.estimateGas({ to: job.target, from: this.signer.address, data: job.data, value: quantitySchema.parse(`0x${job.value.toString(16)}`) });
       const gas = estimated + estimated / 5n;
       if (gas > this.config.gasLimit) throw new Error("Keeper gas ceiling exceeded");
       const raw = await this.signer.sign({
         chainId: BigInt(this.config.chainId), nonce, maxPriorityFeePerGas: priority, maxFeePerGas,
         gas, to: job.target, value: job.value, data: job.data,
       });
-      const transactionHash = await this.rpc.sendRawTransaction(raw);
+      const transactionHash = await rpc.sendRawTransaction(raw);
       await this.repository.markSubmitted(job.id, worker, transactionHash, nonce, maxFeePerGas, now);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown keeper failure";
