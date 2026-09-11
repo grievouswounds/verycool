@@ -22,7 +22,6 @@ time:
   '@ledgerhq/device-transport-kit-speculos@1.2.1': 2026-05-26T13:34:34.320Z
   '@ledgerhq/wallet-cli@2.1.0': 2026-07-30T13:33:17.294Z
   '@mcpjam/cli@5.7.1': 2026-09-10T05:23:26.925Z
-  '@modelcontextprotocol/sdk@1.12.1': 2025-05-29T14:46:37.477Z
   '@noble/curves@1.8.1': 2025-01-18T09:17:06.791Z
   '@noble/hashes@1.7.1': 2025-01-18T08:30:16.704Z
   '@simplewebauthn/server@13.2.2': 2025-10-04T17:06:42.358Z
@@ -49,6 +48,9 @@ importers:
 
   .:
     dependencies:
+      '@cfworker/json-schema':
+        specifier: ^4.1.1
+        version: 4.1.1
       '@hazae41/base16.wasm':
         specifier: 1.0.10
         version: 1.0.10(@hazae41/memory.wasm@1.0.37)
@@ -80,8 +82,8 @@ importers:
         specifier: 2.1.0
         version: 2.1.0
       '@modelcontextprotocol/sdk':
-        specifier: 1.12.1
-        version: 1.12.1(express@5.2.1)(zod@3.25.76)
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.5.4)
       '@noble/curves':
         specifier: 1.8.1
         version: 1.8.1

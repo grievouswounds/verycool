@@ -38,7 +38,7 @@ const canonical = (value: unknown): string => {
     return `{${Object.entries(object).sort(([left], [right]) => left.localeCompare(right))
       .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
   }
-  return JSON.stringify(value) ?? "null";
+  return JSON.stringify(value);
 };
 
 export const schemaFingerprint = (schema: Readonly<Record<string, unknown>>): string =>

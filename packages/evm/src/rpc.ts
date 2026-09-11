@@ -49,7 +49,9 @@ export class HttpRpcTransport implements RpcTransport {
     const id = ++this.requestId;
     const timeoutMs = method === "eth_chainId" ? Math.min(2_000, this.timeoutMs) : this.timeoutMs;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
     let response: Response;
     try {
       response = await this.fetcher(this.url.href, {

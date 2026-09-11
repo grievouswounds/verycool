@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { addressSchema } from "@aqua/core";
+import { z } from "zod";
+import { addressSchema, hexSchema } from "@aqua/core";
 import { initializeCubane, JsonRpcClient, selector } from "../src/index.ts";
+
+const rpcBodySchema = z.object({ id: z.number(), method: z.string() }).loose();
 
 describe("Cubane EVM boundary", () => {
   test("initializes JavaScript cryptography and passes startup vectors", () => {
@@ -25,11 +28,13 @@ describe("Cubane EVM boundary", () => {
 
   test("normalizes empty account code returned as 0x00", async () => {
     const fetcher = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      const body = JSON.parse(String(init?.body)) as { id: number; method: string };
+      const raw = init?.body;
+      if (typeof raw !== "string") throw new Error("RPC test fetcher expected a JSON string body");
+      const body = rpcBodySchema.parse(JSON.parse(raw));
       if (body.method === "eth_getCode") return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x00" });
       return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x1" });
     };
     const client = new JsonRpcClient(new URL("http://rpc.invalid"), 100, fetcher);
-    expect(await client.getCode(addressSchema.parse(`0x${"11".repeat(20)}`))).toBe("0x");
+    expect(await client.getCode(addressSchema.parse(`0x${"11".repeat(20)}`))).toBe(hexSchema.parse("0x"));
   });
 });

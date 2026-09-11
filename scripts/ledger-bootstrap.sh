@@ -4,7 +4,10 @@ set -euo pipefail
 # shellcheck source=scripts/ledger-mode.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ledger-mode.sh"
 aqua_consume_ledger_args --default physical "$@" || exit
+# bash 3.2 + set -u treats an empty "${array[@]}" as unbound.
+set +u
 set -- "${AQUA_LEDGER_REST[@]}"
+set -u
 aqua_apply_ledger_env
 
 state_dir="${AQUA_STATE_DIR:-$PWD/.data}"

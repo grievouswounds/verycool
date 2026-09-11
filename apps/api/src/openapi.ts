@@ -203,4 +203,22 @@ function operation(operationId: string, summary: string, schema: string, secured
   };
 }
 
+const openApiPaths = z.record(z.string(), z.unknown()).parse(openApiDocument["paths"]);
+
+export const gatewayOpenApiDocument: Readonly<Record<string, unknown>> = {
+  ...openApiDocument,
+  info: {
+    title: "Aqua hosted trade gateway",
+    version: "1.0.0",
+    description: "Sellable trade-lifecycle operations for Bazantic. Health, capabilities, and /v1/auth are intentionally omitted.",
+  },
+  paths: {
+    "/v1/trade-previews": openApiPaths["/v1/trade-previews"],
+    "/v1/trades": openApiPaths["/v1/trades"],
+    "/v1/trades/{tradeId}/cancellations": openApiPaths["/v1/trades/{tradeId}/cancellations"],
+    "/v1/trades/{tradeId}/cancellations/{cancellationId}": openApiPaths["/v1/trades/{tradeId}/cancellations/{cancellationId}"],
+  },
+};
+
 export const docsHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Aqua API</title><link rel="stylesheet" href="/docs/swagger-ui.css"></head><body><div id="swagger-ui"></div><script src="/docs/swagger-ui.js"></script><script>SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui',deepLinking:true,displayOperationId:true,filter:true,tryItOutEnabled:true})</script></body></html>`;
+

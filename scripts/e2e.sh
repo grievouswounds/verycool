@@ -4,7 +4,9 @@ set -euo pipefail
 # shellcheck source=scripts/ledger-mode.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ledger-mode.sh"
 aqua_consume_ledger_args --default physical "$@" || exit
+set +u
 set -- "${AQUA_LEDGER_REST[@]}"
+set -u
 aqua_apply_ledger_env
 
 mode="${1:-deterministic}"

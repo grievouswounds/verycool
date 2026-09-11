@@ -41,7 +41,7 @@
     "@hazae41/secp256k1.wasm": "1.0.21",
     "@hazae41/sha3.wasm": "1.0.7",
     "@ledgerhq/wallet-cli": "2.1.0",
-    "@modelcontextprotocol/sdk": "1.12.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@noble/curves": "1.8.1",
     "@noble/hashes": "1.7.1",
     "@simplewebauthn/server": "13.2.2",

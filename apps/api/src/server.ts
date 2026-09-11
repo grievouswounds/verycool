@@ -1,6 +1,7 @@
 import { activityListQuerySchema, activityWipeSchema, addressSchema, agentBindingRequestSchema, agentChallengeRequestSchema, AppError, challengeRequestSchema, delegationPreviewRequestSchema, delegationSubmitRequestSchema, hashSchema, parseStrictJson, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradeCancellationSubmitRequestSchema, tradePreviewRequestSchema, tradesListQuerySchema, tradeSubmitRequestSchema, tradingRequestSchema } from "@aqua/core";
 import type { AuthenticatedPrincipal, AuthenticationScope, Hash, RuntimeManifest } from "@aqua/core";
-import type { AuthService, LedgerWebAuthnService, OAuthService } from "@aqua/adapters";
+import type { AuthService, LedgerWebAuthnService, OAuthService, AgentVault } from "@aqua/adapters";
+import { oauthMcpResource, oauthScopeOrDefault } from "@aqua/adapters";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { ActivityService } from "@aqua/activity";
 import type { TradingService } from "@aqua/orderbook";
@@ -9,9 +10,13 @@ import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/
 import { createQuoterRoutes } from "@aqua/quoter";
 import type { QuoterService } from "@aqua/quoter";
 import { z, ZodError } from "zod";
-import { docsHtml, openApiDocument } from "./openapi.ts";
+import { docsHtml, gatewayOpenApiDocument, openApiDocument } from "./openapi.ts";
 import { swaggerCssResponse, swaggerJavaScriptResponse } from "./swagger.ts";
 import { authorizePageHeaders, authorizePageHtml, htmxResponse, htmlFragment, oauthParameterNames, renderAppErrorFragment, renderSuccessFragment, renderWaitingFragment } from "./authorize.ts";
+import { MCP_OAUTH_CORS_PATHS, applyMcpCors, mcpCorsPreflight, mcpUnauthorized } from "./cors.ts";
+import { handleHostedMcp } from "./mcp.ts";
+import { decodeUint256, encodeBalanceOf } from "@aqua/evm";
+import type { RpcPort } from "@aqua/core";
 
 export interface ServerDependencies {
   readonly trading: TradingService;
@@ -21,6 +26,8 @@ export interface ServerDependencies {
   readonly webauthn: LedgerWebAuthnService;
   readonly oauth: OAuthService;
   readonly quoter: QuoterService;
+  readonly agentVault: AgentVault | null;
+  readonly rpc: RpcPort;
   readonly corsOrigin: string;
   readonly issuer: string;
   readonly resource: string;
@@ -142,7 +149,7 @@ const authenticationResponseSchema=z.custom<AuthenticationResponseJSON>((value)=
 const webauthnFinishRegistrationSchema=z.object({id:z.uuid(),response:registrationResponseSchema}).strict();
 const webauthnStartAuthenticationSchema=z.object({address:addressSchema}).strict();
 const webauthnFinishAuthenticationSchema=z.object({id:z.uuid(),response:authenticationResponseSchema,clientId:z.string().min(1).max(256).default("aqua-mcp-local")}).strict();
-const oauthStartSchema=z.object({address:addressSchema,authorization:z.object({client_id:z.string(),redirect_uri:z.url(),resource:z.url(),scope:z.string(),state:z.string(),code_challenge:z.string(),code_challenge_method:z.literal("S256"),response_type:z.literal("code")}).strict()}).strict();
+const oauthStartSchema=z.object({address:addressSchema,authorization:z.object({client_id:z.string(),redirect_uri:z.url(),resource:z.url(),scope:z.string(),state:z.string(),code_challenge:z.string(),code_challenge_method:z.literal("S256"),response_type:z.literal("code")}).strict().transform((authorization)=>({...authorization,scope:oauthScopeOrDefault(authorization.scope)}))}).strict();
 const oauthCompleteSchema=z.object({id:z.uuid(),response:authenticationResponseSchema}).strict();
 const form=async(request:Request):Promise<URLSearchParams>=>{const media=request.headers.get("content-type")?.split(";",1)[0]?.trim();if(media!=="application/x-www-form-urlencoded")throw new AppError(415,"invalid_request","OAuth token requests must be form encoded");const text=await request.text();if(text.length>16_384)throw new AppError(413,"invalid_request","OAuth form is too large");return new URLSearchParams(text);};
 const htmlError = (error: unknown, address: string): Response | null => {
@@ -165,30 +172,35 @@ export const authenticationChallenge = (error: AppError): string | null => {
 
 const execute = async (request: Request, action: () => Promise<Response>, corsOrigin: string): Promise<Response> => {
   const id = requestId(request);
-  try {
-    const response = await action();
+  const attach = (response: Response): Response => {
     response.headers.set("x-request-id", id);
-    response.headers.set("access-control-allow-origin", corsOrigin);
+    const path = new URL(request.url).pathname;
+    if (MCP_OAUTH_CORS_PATHS.has(path)) applyMcpCors(response, request);
+    else response.headers.set("access-control-allow-origin", corsOrigin);
+    if (response.headers.has("www-authenticate")) response.headers.set("access-control-expose-headers", "WWW-Authenticate");
     return response;
+  };
+  try {
+    return attach(await action());
   } catch (error: unknown) {
     if (error instanceof AppError) {
       console.error(JSON.stringify({ level: "error", requestId: id, type: error.type, status: error.status, message: error.message, url: request.url }));
       const response = problem(error.status, error.type, error.message, id);
       const challenge = authenticationChallenge(error);
       if (challenge !== null) response.headers.set("www-authenticate", challenge);
-      return response;
+      return attach(response);
     }
     if (error instanceof ZodError) {
       const issues = flattenZodIssues(error);
       console.error(JSON.stringify({ level: "error", requestId: id, message: "Zod validation", issues, url: request.url }));
-      return problem(422, "urn:aqua:error:validation", "Request does not belong to the endpoint input language", id, issues);
+      return attach(problem(422, "urn:aqua:error:validation", "Request does not belong to the endpoint input language", id, issues));
     }
     console.error(JSON.stringify({
       level: "error", requestId: id,
       message: error instanceof Error ? error.message : "Unknown error",
       stack: error instanceof Error ? error.stack : undefined,
     }));
-    return problem(500, "urn:aqua:error:internal", "Unexpected server error", id);
+    return attach(problem(500, "urn:aqua:error:internal", "Unexpected server error", id));
   }
 };
 
@@ -199,8 +211,16 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
       parseJson,
       authenticate:async(request,scope)=>{const principal=await bearer(request,dependencies.auth);requireScope(principal,scope);return principal;},
     }}),
-    "/.well-known/oauth-protected-resource": () => Response.json({resource:dependencies.resource,authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
-    "/.well-known/oauth-authorization-server": () => Response.json({issuer:dependencies.issuer,authorization_endpoint:`${dependencies.issuer}/authorize`,token_endpoint:`${dependencies.issuer}/token`,registration_endpoint:`${dependencies.issuer}/register`,response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],code_challenge_methods_supported:["S256"],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}),
+    "/.well-known/oauth-protected-resource": (request) => applyMcpCors(Response.json({resource:dependencies.resource,authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}), request),
+    "/.well-known/oauth-protected-resource/mcp": (request) => applyMcpCors(Response.json({resource:oauthMcpResource(dependencies.issuer),authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}), request),
+    "/mcp/.well-known/oauth-protected-resource": (request) => applyMcpCors(Response.json({resource:oauthMcpResource(dependencies.issuer),authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}), request),
+    "/.well-known/oauth-authorization-server": (request) => applyMcpCors(Response.json({issuer:dependencies.issuer,authorization_endpoint:`${dependencies.issuer}/authorize`,token_endpoint:`${dependencies.issuer}/token`,registration_endpoint:`${dependencies.issuer}/register`,response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],code_challenge_methods_supported:["S256"],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}), request),
+    "/mcp": {
+      POST: (request) => execute(request, async () => {
+        if (dependencies.agentVault === null) throw new AppError(503, "urn:aqua:error:agent-kek", "AQUA_AGENT_KEK is not configured");
+        return handleHostedMcp(request, { origin: dependencies.issuer, auth: dependencies.auth, tradeApi: dependencies.tradeApi, activity: dependencies.activity, agentVault: dependencies.agentVault, rpc: dependencies.rpc });
+      }, dependencies.corsOrigin),
+    },
     "/authorize": new Response(authorizePageHtml,{headers:authorizePageHeaders}),
     "/authorize/htmx.js": htmxResponse,
     "/authorize/ceremony": {POST:(request)=>execute(request,async()=>{
@@ -243,14 +263,38 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
       ? Response.json({ status: "ready" })
       : Response.json({ status: "not-ready" }, { status: 503 }),
     "/openapi.json": () => Response.json(openApiDocument),
+    "/openapi.gateway.json": () => Response.json(gatewayOpenApiDocument),
     "/docs": new Response(docsHtml, { headers: { "content-type": "text/html; charset=utf-8" } }),
     "/docs/swagger-ui.css": swaggerCssResponse,
     "/docs/swagger-ui.js": swaggerJavaScriptResponse,
+    "/setup": async (request) => {
+      const ownerParam = new URL(request.url).searchParams.get("owner");
+      const parsed = addressSchema.safeParse(ownerParam);
+      if (!parsed.success) return new Response("owner query parameter is required", { status: 400, headers: { "content-type": "text/plain; charset=utf-8" } });
+      const owner = parsed.data;
+      const enrolled = await dependencies.webauthn.isEnrolled(owner);
+      const agent = dependencies.agentVault === null ? null : await dependencies.agentVault.peekAgent(owner);
+      const tokens = dependencies.manifest.fixtures.tokens.map((token) => token.address);
+      const delegations = agent === null ? [] : await dependencies.tradeApi.fixtureDelegations(owner, tokens);
+      const native = agent === null || dependencies.rpc.balance === undefined ? null : await dependencies.rpc.balance(agent);
+      const sellBalances: { token: string; symbol: string; balance: string }[] = [];
+      if (agent !== null) {
+        for (const token of dependencies.manifest.fixtures.tokens) {
+          const raw = decodeUint256(await dependencies.rpc.call({ to: token.address, data: encodeBalanceOf(agent) }));
+          sellBalances.push({ token: token.address, symbol: token.symbol, balance: raw.toString() });
+        }
+      }
+      const body = JSON.stringify({
+        owner, enrolled, agent, nativeBalance: native?.toString() ?? null, sellBalances, delegations,
+        setup: "bun scripts/setup-hosted-owner.ts", origin: dependencies.issuer,
+      }, null, 2);
+      return new Response(body, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+    },
     "/v1/capabilities": () => Response.json({
       apiStyle: "agent-first",
       amountLanguage: "canonical unsigned decimal string; no signs, exponent notation, separators, or leading zeroes",
       tradingEndpoint: "POST /v1/trade-previews then POST /v1/trades",
-      mcpTransport: "local stdio bridge; no remote /mcp endpoint",
+      mcpTransport: "hosted Streamable HTTP /mcp with OAuth; local stdio bridge aqua-ledger-key-ring remains available",
       mcpTools: ["request_trade","post_trade","get_trades","cancel_trade","subscribe_to_user","unsubscribe_from_user","wipe_subscribed_trades"],
       actions: ["createOrder", "amendOrder", "cancelOrders", "executeOrder", "prepareSwap", "batch", "query", "manageWrappedNative"],
       orderKinds: ["market", "limit", "stopMarket", "stopLimit", "trailingStop", "takeProfitMarket", "takeProfitLimit", "oco", "bracket"],
@@ -344,6 +388,11 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
         return response;
       }, dependencies.corsOrigin),
     },
+    "/v1/agents/provision": { POST: (request) => execute(request, async () => {
+      const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
+      if (dependencies.agentVault === null) throw new AppError(503, "urn:aqua:error:agent-kek", "AQUA_AGENT_KEK is not configured");
+      return Response.json(await dependencies.agentVault.provision(principal.address), { status: 201 });
+    }, dependencies.corsOrigin) },
     "/v1/agents/me/challenges": { POST: (request) => execute(request, async () => {
       const principal = await bearer(request, dependencies.auth); requireScope(principal, "trading:write"); requireHardware(principal);
       const input = agentChallengeRequestSchema.parse(await parseJson(request));
@@ -407,8 +456,14 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
   },
   fetch(request) {
     const path = new URL(request.url).pathname;
-    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/authorize/htmx.js","/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/v1/capabilities", "/v1/trades", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
-    const postPaths = new Set(["/register","/authorize/ceremony","/authorize/grant","/oauth/authorize/start","/oauth/authorize/complete","/token","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/agents/me/challenges", "/v1/delegations/previews", "/v1/delegations", "/v1/trade-previews", "/v1/trades", "/v1/trade-subscriptions", "/v1/trade-subscriptions/trades/wipe", "/v1/trading", "/v1/quotes/aqua", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
+    if (request.method === "OPTIONS" && MCP_OAUTH_CORS_PATHS.has(path)) return mcpCorsPreflight(request);
+    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-protected-resource/mcp","/mcp/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/authorize/htmx.js","/health/live", "/health/ready", "/openapi.json", "/openapi.gateway.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/setup", "/v1/capabilities", "/v1/trades", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
+    const postPaths = new Set(["/mcp","/register","/authorize/ceremony","/authorize/grant","/oauth/authorize/start","/oauth/authorize/complete","/token","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/agents/provision", "/v1/agents/me/challenges", "/v1/delegations/previews", "/v1/delegations", "/v1/trade-previews", "/v1/trades", "/v1/trade-subscriptions", "/v1/trade-subscriptions/trades/wipe", "/v1/trading", "/v1/quotes/aqua", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
+    if (path === "/mcp") {
+      const response = mcpUnauthorized(dependencies.issuer, request, null, 405);
+      response.headers.set("allow", "POST, OPTIONS");
+      return response;
+    }
     if (/^\/v1\/erc20-monitor\/subscriptions\/0x[0-9a-fA-F]{40}$/u.test(path)) {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
       response.headers.set("allow", "DELETE");

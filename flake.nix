@@ -259,7 +259,9 @@
             # shellcheck disable=SC1091
             source "$PWD/scripts/ledger-mode.sh"
             aqua_consume_ledger_args --default ${defaultMode} "$@" || exit
+            set +u
             set -- "''${AQUA_LEDGER_REST[@]}"
+            set -u
             aqua_apply_ledger_env
             if [[ "$AQUA_LEDGER" == emulator ]]; then
               exec ${emulatedBin}/bin/${emulatedName} "$@"

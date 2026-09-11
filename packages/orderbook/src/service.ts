@@ -83,7 +83,7 @@ const invertPrice = (price: string): string => {
 /** Reorients indexed orders onto the requested pair so aUSD/aETH bids are visible when selling aETH. */
 export const asRequestedPair = (orders: readonly IndexedOrder[], baseToken: Address, quoteToken: Address): readonly IndexedOrder[] => {
   if (orders.length === 0) return orders;
-  if (orders[0]?.baseToken === baseToken && orders[0]?.quoteToken === quoteToken) return orders;
+  if (orders.every((order) => order.baseToken === baseToken && order.quoteToken === quoteToken)) return orders;
   return orders.map((order) => {
     const quoteUnits = calculateLimitAmounts(
       order.side, { denomination: "base", amount: order.remainingBaseAmount }, order.price, order.baseDecimals, order.quoteDecimals,

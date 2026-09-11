@@ -13,7 +13,7 @@ describe("mcp-check helpers", () => {
   test("accepts gateway, bridge, and all modes", () => {
     expect(parseMcpCheckMode("gateway")).toBe("gateway");
     expect(parseMcpCheckMode("bridge")).toBe("bridge");
-    expect(parseMcpCheckMode("all")).toBe("all");
+    expect(parseMcpCheckMode("hosted")).toBe("hosted");
     expect(() => parseMcpCheckMode("pay")).toThrow();
   });
 
@@ -38,7 +38,11 @@ describe("mcp-check helpers", () => {
   });
 
   test("refuses the SIWE access-token override", () => {
-    expect(() => assertHardwareAmrPath({ AQUA_ACCESS_TOKEN: "paseto" })).toThrow(/AQUA_ACCESS_TOKEN/);
-    expect(() => assertHardwareAmrPath({})).not.toThrow();
+    expect(() => {
+      assertHardwareAmrPath({ AQUA_ACCESS_TOKEN: "paseto" });
+    }).toThrow(/AQUA_ACCESS_TOKEN/);
+    expect(() => {
+      assertHardwareAmrPath({});
+    }).not.toThrow();
   });
 });

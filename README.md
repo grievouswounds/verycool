@@ -1,6 +1,12 @@
 # Aqua backend
 
-A non-custodial Aqua order-book and Ledger Key Ring trading API implemented with `Bun.serve`. The canonical agent flow is an immutable preview followed by an x402 exact/Permit2-funded submission. A distributable local stdio MCP bridge owns OAuth, Ledger Key Ring provisioning, and signing; user keys never enter the API.
+An Aqua order-book and trading API implemented with `Bun.serve`. The canonical agent flow is an immutable preview followed by an x402 exact/Permit2-funded submission.
+
+**Hosted MCP is custodial for the agent key.** Ledger FIDO2 on The Aqua Room proves who started the MCP Jam session. It does not gate decryption of the per-owner agent key. `AQUA_AGENT_KEK` plus a database dump can sign lifecycle and Permit2 payloads for every provisioned owner, within that owner's on-chain Policy. Caps expire in seven days. Compromise playbook: rotate the KEK (`kek_id` in `wrap_context`), revoke delegations on-chain, and reprovision. Do not treat hosted `/mcp` as non-custodial.
+
+The local stdio bridge `aqua-ledger-key-ring` still keeps the agent key in Ledger Key Ring ciphertext on the laptop. `wallet-cli ring destroy` tears down the trustchain root (including Ledger Sync) and member rotation orphans old ciphertext.
+
+Hosted Streamable HTTP is `https://vercel-henna-gamma-46.vercel.app/mcp` (server name `aqua`). Unique `*.vercel.app` deployment URLs fail WebAuthn.
 
 It also monitors confirmed ERC-20 transfers for addresses selected by authenticated users. Collection is polling-based: a separate worker wakes once per minute and writes results to PostgreSQL; subscribing never opens a websocket.
 
@@ -205,6 +211,14 @@ Send either body to `POST /v1/erc20-monitor/actions/wipe`. A pure incoming trans
 
 `payWithNative` prepares a wrapped-native deposit before the SwapVM call. The pinned SwapVM v1.0.2 `swap` entry point is non-payable, so the swap itself intentionally has zero native value. `receiveNative` uses the router unwrap trait and is restricted to the configured wrapped-native token.
 
+## Hosted MCP (Acts 1–3)
+
+Two Ledger apps, never at the same time. Trades on hosted `/mcp` use neither.
+
+1. **Act 1 — once, USB, terminal.** `nix develop`, quit Ledger Live, `AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app bun scripts/setup-hosted-owner.ts`. Ethereum app: SIWE. Security Key app: FIDO2 register **and immediately** FIDO2 authenticate (hardware PASETO). The script then `POST /v1/agents/provision`. Ethereum app again: one EIP-712 delegation per fixture token (`maxPerOrder = 1`, `maxPerDay = 100`, 7 days). Fund the printed agent. Optional `--fund`. Status: `GET /setup?owner=0x…` (read-only).
+2. **Act 2 — once per MCP Jam session.** Add `https://vercel-henna-gamma-46.vercel.app/mcp`. The Room opens in the default browser. Type the enrolled owner, Knock, confirm on the Security Key app. Redirect returns `code`, `state`, and `iss`.
+3. **Act 3 — every trade.** `request_trade` then `post_trade`. The server unwraps the owner agent key and signs. No browser. No device. A 409 `delegation-required` names `/setup` and `setup-hosted-owner.ts`.
+
 ## Local MCP bridge
 
 `apps/mcp-bridge` exposes exactly `request_trade`, `post_trade`, `get_trades`, `cancel_trade`, `subscribe_to_user`, `unsubscribe_from_user`, and `wipe_subscribed_trades` over stdio. On first start its isolated signer runs `wallet-cli ring init` when required, creates a random secp256k1 agent key, and writes only LKRP ciphertext plus the public address. Decryption and signing happen only in the child signer process; plaintext key material is never printed or persisted. After authentication the bridge automatically proves possession of and binds that agent. Fund the displayed agent with native gas and sell assets, then register the suggested Ledger delegation before the first trade.
@@ -219,7 +233,7 @@ The same isolated LKRP/Cubane signer serves both payment profiles, but they are 
 
 The Bazantic CLI, hosted grants, and `BAZANTIC_GATEWAY_PRIVATE_KEY` are not runtime dependencies. 1inch Aqua quotes remain local SwapVM `eth_call` simulations; `ONEINCH_API_KEY` enables only optional spot-price endpoints.
 
-`aube run deploy` (or `nix develop -c deploy`) bundles `apps/api` and `apps/facilitator` into `out/vercel`, deploys that artifact to Vercel (`vercel deploy --prod`), and runs `baz gateway add` as a draft (`--auth-type api-key`). It mints a SIWE PASETO against `AQUA_DEPLOY_SIGNING_KEY` (defaults to Anvil account 0; set a fresh key for a public gateway) and writes `.data/bazantic-gateway.json` plus a mode-0600 `.data/bazantic-access.token`. Prerequisites: `baz login` with `gateway:write`, a production runtime manifest at `.data/runtime-manifest.production.json` (from `bun scripts/deploy-public-chain.ts` on Ethereum Sepolia; set `AQUA_DEPLOYER_PRIVATE_KEY`, `AQUA_AGENT_KEY`, `AQUA_FACILITATOR_KEY`, `AQUA_KEEPER_KEY`, and `PASETO_V4_SECRET_KEY`; only the deployer address needs Sepolia ETH, and no RPC URL env var is required), Neon Postgres `DATABASE_URL` (pooled `-pooler` host), env signing keys (`AQUA_SIGNER=env`), and the Vercel CLI (`vercel` on PATH or `bunx vercel`). Finish in the Bazantic dashboard: bearer delivery of that token, per-method prices, then activate. MCPJam should use the local stdio bridge (`bun apps/mcp-bridge/src/main.ts --dev` or `--prod`, `AQUA_API_URL` pointing at the Vercel origin, `XDG_STATE_HOME` under `.data/aqua-mcp-state`), not the hosted `{endpointUrl}/mcp` as a tool-calling transport. A SIWE token reaches health, capabilities, OpenAPI, `/v1/trading`, prices, Aqua quotes, and ERC-20 monitor reads; `/v1/trades`, trade previews, delegations, agent binding, and trade subscriptions still require hardware AMR and belong on the local stdio `aqua-mcp` bridge. The generated `{endpointUrl}/mcp` is discovery-only (`tools/list`); ordinary MCP clients cannot settle its `402`, so paid traffic uses `baz curl`. Override `AQUA_VERCEL_URL` or `AQUA_DEPLOY_SIGNING_KEY` when needed. Local `dev`/`start`, Anvil, Speculos, and the worker loops stay on your machine and can point at the hosted database and chain.
+`aube run deploy` (or `nix develop -c deploy`) bundles `apps/api` and `apps/facilitator` into `out/vercel`, deploys that artifact to Vercel, and registers a Bazantic draft against `/openapi.gateway.json` (`--auth-type x402-mpp`, override with `AQUA_BAZANTIC_AUTH_TYPE=api-key` if the CLI rejects `x402-mpp`). `AQUA_PUBLIC_ORIGIN` is the sole public host; the Aliased Vercel host must match it. Upsert `AQUA_AGENT_KEK` (32 bytes) and keep `AQUA_AGENT_KEY` for the platform broker. MCP Jam uses `{AQUA_PUBLIC_ORIGIN}/mcp`, not the Bazantic MCP URL. Prerequisites: `baz login` with `gateway:write`, a production runtime manifest at `.data/runtime-manifest.production.json` (reuse pinned Sepolia contracts; do not redeploy the factory), Neon Postgres `DATABASE_URL`, env signing keys, and the Vercel CLI. Delete probe gateway `7cjtotejxfb63n74uqsrqx2xmi` from the dashboard by hand.
 
 ## Configuration
 

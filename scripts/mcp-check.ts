@@ -6,7 +6,7 @@ import { requiredAquaTools, type AquaMcpToolName } from "../apps/mcp-bridge/src/
 import { applyLedgerArgv, type LedgerMode } from "./ledger-mode.ts";
 import { z } from "zod";
 
-export const MCP_CHECK_MODES = ["gateway", "bridge", "all"] as const;
+export const MCP_CHECK_MODES = ["gateway", "bridge", "hosted", "all"] as const;
 export type McpCheckMode = (typeof MCP_CHECK_MODES)[number];
 
 const doctorSchema = z.object({
@@ -44,7 +44,7 @@ const requireCommand = (name: string, hint: string): string => {
 };
 
 export const parseMcpCheckMode = (value: string): McpCheckMode => {
-  if (value === "gateway" || value === "bridge" || value === "all") return value;
+  if (value === "gateway" || value === "bridge" || value === "hosted" || value === "all") return value;
   return fail(`mode must be ${MCP_CHECK_MODES.join(", ")}, not ${value}`);
 };
 
@@ -110,6 +110,14 @@ const assertToolCatalog = (body: unknown, label: string): void => {
   if (missing.length > 0) fail(`${label} is missing required tools: ${missing.join(", ")}`);
 };
 
+const checkHosted = async (mcpjam: string): Promise<void> => {
+  const origin = envOr("AQUA_PUBLIC_ORIGIN", "").replace(/\/$/u, "");
+  if (origin.length === 0) return fail("AQUA_PUBLIC_ORIGIN is required for hosted MCP OAuth checks");
+  const mcpUrl = `${origin}/mcp`;
+  await runJson(mcpjam, ["oauth", "conformance", "--url", mcpUrl, "--reporter", "json-summary"]);
+  console.log(JSON.stringify({ ok: true, mode: "hosted", mcpUrl }));
+};
+
 const checkGateway = async (mcpjam: string, root: string): Promise<void> => {
   const slug = await resolveSlug(root);
   const gateway = await new BazanticCatalogClient({}).getGateway(slug);
@@ -158,6 +166,8 @@ const main = async (): Promise<void> => {
   const mcpjam = requireCommand("mcpjam", "Add @mcpjam/cli as a development dependency with aube so the binary is on PATH.");
   const bun = requireCommand("bun", "Enter the Nix shell so bun is on PATH.");
   if (mode === "gateway" || mode === "all") await checkGateway(mcpjam, root);
+  if (mode === "hosted") await checkHosted(mcpjam);
+  if (mode === "all" && (Bun.env["AQUA_PUBLIC_ORIGIN"]?.trim() ?? "").length > 0) await checkHosted(mcpjam);
   if (mode === "bridge" || mode === "all") await checkBridge(mcpjam, bun, root, parsed.mode);
 };
 

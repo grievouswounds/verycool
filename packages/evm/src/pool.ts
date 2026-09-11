@@ -219,7 +219,7 @@ export class PooledRpcTransport implements RpcTransport {
             if (!(error instanceof ClassifiedRpcError)) {
               if (!settled) {
                 settled = true;
-                reject(error);
+                reject(error instanceof Error ? error : new Error("unclassified RPC hedge failure"));
               }
               return;
             }

@@ -1,16 +1,27 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { discoverAquaTools, schemaFingerprint } from "../src/bazantic-tools.ts";
 
 const catalogUrl = "https://catalog.e2e.invalid/mcp/";
 const gatewayUrl = "https://aqua.e2e.invalid/mcp";
 const aliases = ["requestTrade", "postTrade", "getTrades", "cancelTrade", "subscribeToUser", "unsubscribeFromUser", "wipeSubscribedTrades"];
+const rpcBodySchema = z.object({
+  method: z.string(),
+  params: z.object({ name: z.string().optional() }).loose().optional(),
+}).loose();
 const sse = (value: unknown): Response => new Response(`event: message\ndata: ${JSON.stringify(value)}\n\n`, {
   headers: { "content-type": "text/event-stream" },
 });
 
+const requestBody = (init: RequestInit | undefined): string => {
+  const body = init?.body;
+  if (typeof body === "string") return body;
+  throw new Error("test fetcher expected a JSON string body");
+};
+
 const routedFetch = (toolNames: readonly string[] = aliases) => async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-  const request = JSON.parse(String(init?.body)) as { readonly method: string; readonly params?: { readonly name?: string } };
+  const request = rpcBodySchema.parse(JSON.parse(requestBody(init)));
   if (url === catalogUrl) {
     expect(request.method).toBe("tools/call");
     expect(request.params?.name).toBe("get_gateway");
@@ -44,8 +55,12 @@ describe("Bazantic-backed Aqua MCP catalog", () => {
   });
 
   test("fails closed when the generated gateway omits a required operation", async () => {
-    await expect(discoverAquaTools({ gatewaySlug: "aqua", catalogUrl, fetch: routedFetch(aliases.slice(0, -1)) }))
-      .rejects.toThrow("missing required operation wipe_subscribed_trades");
+    try {
+      await discoverAquaTools({ gatewaySlug: "aqua", catalogUrl, fetch: routedFetch(aliases.slice(0, -1)) });
+      throw new Error("expected missing required operation");
+    } catch (error: unknown) {
+      expect(error instanceof Error ? error.message : "").toContain("missing required operation wipe_subscribed_trades");
+    }
   });
 
   test("schema fingerprints are stable across object key order", () => {

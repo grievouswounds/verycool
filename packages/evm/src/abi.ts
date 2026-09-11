@@ -43,6 +43,12 @@ export const decodeOrder = (encoded: Hex): SwapVmOrder => {
 const encodeCall = (signature: string, encodedArguments: string): Hex =>
   concatHex(selector(signature), hexSchema.parse(`0x${encodedArguments}`));
 
+export const encodeMint = (recipient: Address, amount: bigint): Hex => encodeCall(
+  "mint(address,uint256)",
+  Abi.Tuple.create(Abi.Address, Abi.Uint256)
+    .fromOrThrow([addressToBigInt(recipient), amount]).encodeOrThrow(),
+);
+
 export const encodeApprove = (spender: Address, amount: bigint): Hex => encodeCall(
   "approve(address,uint256)",
   Abi.Tuple.create(Abi.Address, Abi.Uint256)

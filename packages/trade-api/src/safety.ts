@@ -161,7 +161,7 @@ export const simulateFundedCalls = async (input: {
   });
   const allowance = decodeUint256(await input.rpc.call({ to: input.sellToken, data: encodeAllowance(input.agent, input.permit2) }));
   checks.push({ name: "permit2Allowance", safe: true, severity: "info", allowance: allowance.toString() });
-  const malicious = checks.some((check) => check.severity === "malicious" || check.safe === false);
+  const malicious = checks.some((check) => check.severity === "malicious" || !check.safe);
   const warning = checks.some((check) => check.severity === "warning") || warnings.length > 0;
   const safe = !malicious && !anyFailed;
   return { safe, verdict: malicious ? "malicious" : warning ? "warning" : "benign", checks, warnings };

@@ -2,6 +2,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { z } from "zod";
 
 if (Bun.env["AQUA_E2E"] !== "1") throw new Error("The E2E wallet-cli adapter cannot run outside AQUA_E2E=1");
 const state = Bun.env["AQUA_E2E_LKRP_STATE"];
@@ -19,7 +20,7 @@ const appProof = async (): Promise<void> => {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ data: "e003000000" }),
   });
   if (!response.ok) throw new Error(`Ledger Sync Speculos APDU failed with HTTP ${String(response.status)}`);
-  const body = await response.json() as { readonly data?: string };
+  const body = z.object({ data: z.string().optional() }).loose().parse(JSON.parse(await response.text()));
   if (typeof body.data !== "string" || !body.data.toLowerCase().endsWith("9000")) throw new Error("Ledger Sync app did not answer the application-info APDU");
 };
 

@@ -1,9 +1,9 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- stdio MCP shares Server with hosted /mcp on SDK 1.29 */
 import "./json-bigint.mjs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-/* type-coverage:ignore-next-line -- MCP SDK 1.12 publishes Zod 3 schemas while the application uses Zod 4. */
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { PayingHttpClient, parseHttpJson } from "@aqua/bazantic";
 import {
@@ -284,20 +284,18 @@ const tools = [
   { name: "wipe_subscribed_trades", description: "Delete stored subscribed-wallet trades for one address or all addresses; subscriptions remain active.", inputSchema: schema(subscribedTradesWipeSchema) },
 ] as const;
 const server = new Server({ name: "aqua-ledger-key-ring", version: "1.0.0" }, { capabilities: { tools: {} } });
-/* type-coverage:ignore-next-line -- request schema inference is untyped upstream across the Zod major-version boundary. */
 server.setRequestHandler(ListToolsRequestSchema, () => Promise.resolve({ tools }));
-/* type-coverage:ignore-next-line -- request schema inference is untyped upstream across the Zod major-version boundary. */
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     const session = await ensureSession();
     const arguments_: unknown = request.params.arguments ?? {};
-    if (request.params.name === "request_trade") return requestTrade(session, arguments_);
-    if (request.params.name === "post_trade") return postTrade(session, arguments_);
-    if (request.params.name === "get_trades") return getTrades(session, arguments_);
-    if (request.params.name === "cancel_trade") return cancelTrade(session, arguments_);
-    if (request.params.name === "subscribe_to_user") return subscription(session, arguments_, false);
-    if (request.params.name === "unsubscribe_from_user") return subscription(session, arguments_, true);
-    if (request.params.name === "wipe_subscribed_trades") return wipe(session, arguments_);
+    if (request.params.name === "request_trade") return await requestTrade(session, arguments_);
+    if (request.params.name === "post_trade") return await postTrade(session, arguments_);
+    if (request.params.name === "get_trades") return await getTrades(session, arguments_);
+    if (request.params.name === "cancel_trade") return await cancelTrade(session, arguments_);
+    if (request.params.name === "subscribe_to_user") return await subscription(session, arguments_, false);
+    if (request.params.name === "unsubscribe_from_user") return await subscription(session, arguments_, true);
+    if (request.params.name === "wipe_subscribed_trades") return await wipe(session, arguments_);
     throw new Error("Unknown tool");
   } catch (error) {
     console.error(error);

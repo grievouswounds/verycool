@@ -23,7 +23,7 @@ const steps: readonly { readonly title: string; readonly body: string }[] = [
   { title: "Give your name", body: "Enter the enrolled owner address — the one written in the guest ledger." },
   { title: "The doorman looks you over", body: "Chrome offers “Use a passkey” then “USB device”. Safari says “Security Key”." },
   { title: "Sign the register", body: "Confirm on the device: both buttons on a Nano, tap on Stax and Flex." },
-  { title: "Come on in", body: "We send you back to the loopback listener the CLI is holding open." },
+  { title: "Come on in", body: "We send you back to MCP Jam with a code, state, and iss. No loopback CLI listener is required." },
 ];
 
 const stepState = (phase: DoorPhase, index: number): "done" | "current" | "todo" => {
@@ -79,9 +79,9 @@ export const renderEnrollmentPanel = (address: string): string =>
   `<section class="panel enroll" data-outcome="enroll">
     <h2>Not on the guest list</h2>
     <p>No Ledger Security Key credential is enrolled for <code>${escapeHtml(address)}</code>. A browser cannot sign the SIWE challenge this door requires, so enrollment happens at the bar, not at the peephole.</p>
-    <p>Switch to the <strong>Ethereum app</strong> for the SIWE signature, then the <strong>Security Key app</strong> for FIDO2 registration, and run:</p>
-    <pre><code>bun scripts/enroll-ledger.ts</code></pre>
-    <p>The script talks to <code>AQUA_API_URL</code> (default <code>http://127.0.0.1:3000</code>) and needs <code>AQUA_PYTHON</code> with python-fido2 — enter <code>nix develop</code> if either is missing.</p>
+    <p>Switch to the <strong>Ethereum app</strong> for SIWE, then the <strong>Security Key app</strong> for FIDO2 register and authenticate, then Ethereum again for fixture-token delegations, and run:</p>
+    <pre><code>AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app bun scripts/setup-hosted-owner.ts</code></pre>
+    <p>Enrol only against the pinned origin. Credentials created on 127.0.0.1 will not work on Vercel. The script needs <code>AQUA_PYTHON</code> with python-fido2 — enter <code>nix develop</code> if it is missing.</p>
   </section>`;
 
 const retryButton = `<button type="submit" form="guest" class="retry">Knock again</button>`;
@@ -94,7 +94,7 @@ export const renderBrowserError = (name: string): string => {
     return renderErrorFragment("The peephole closed", "The browser cancelled the Security Key prompt, or it timed out. Unlock the Ledger, open the Security Key app, and knock again.", retryButton);
   }
   if (name === "InvalidStateError") {
-    return renderErrorFragment("Wrong coat check", "This credential is already bound in a way the browser will not reuse. Re-enroll with <code>bun scripts/enroll-ledger.ts</code>.");
+    return renderErrorFragment("Wrong coat check", "This credential is already bound in a way the browser will not reuse. Re-enroll with <code>bun scripts/setup-hosted-owner.ts</code> against the pinned origin.");
   }
   if (name === "SecurityError") {
     return renderErrorFragment("Wrong street", "This origin does not match the configured relying party. Load the page at the exact host from <code>manifest.auth</code> — for local work that is <code>http://127.0.0.1:3000/authorize</code>.");
@@ -119,7 +119,7 @@ export const renderAppErrorFragment = (error: AppError, address = ""): string =>
     return renderErrorFragment("The doorman does not know that handshake", "The signature was rejected, the assertion counter rolled back, or the device is not a genuine Ledger. Open the Security Key app on the enrolled device and knock again.", retryButton);
   }
   if (error.type === "urn:aqua:error:webauthn-credential") {
-    return renderErrorFragment("That name is not on this register", "The credential is not bound to this owner. Check the address, or enroll it with <code>bun scripts/enroll-ledger.ts</code>.");
+    return renderErrorFragment("That name is not on this register", "The credential is not bound to this owner. Check the address, or enroll it with <code>bun scripts/setup-hosted-owner.ts</code>.");
   }
   if (error.type === "invalid_request" || error.type === "invalid_target") {
     return renderErrorFragment("That client is not on the list", "The calling bridge is not registered, or its redirect and resource do not match. Re-run the MCP bridge so it registers again.");

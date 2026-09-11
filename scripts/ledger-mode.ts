@@ -56,7 +56,8 @@ export const parseLedgerArgv = (
 };
 
 export const applyLedgerMode = (mode: LedgerMode, env: NodeJS.ProcessEnv, root = env["AQUA_ROOT"] ?? process.cwd()): LedgerMode => {
-  const stateDir = env["AQUA_STATE_DIR"]?.trim() || `${root}/.data`;
+  const configuredState = env["AQUA_STATE_DIR"]?.trim();
+  const stateDir = configuredState !== undefined && configuredState.length > 0 ? configuredState : `${root}/.data`;
   env["AQUA_LEDGER"] = mode;
   if (mode === "emulator") {
     env["AQUA_E2E"] = "1";

@@ -7,3 +7,4 @@ export * from "./keeper.ts";
 export * from "./database.ts";
 export * from "./ledger-webauthn.ts";
 export * from "./oauth.ts";
+export * from "./agent-vault.ts";

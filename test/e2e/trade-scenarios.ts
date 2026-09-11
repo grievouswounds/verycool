@@ -2,9 +2,7 @@ import { addressSchema, hashSchema } from "@aqua/core";
 import { z } from "zod";
 import { firstToken, secondToken, lowerUsdEthBid, raiseUsdEthBid, waitForWorker, mine } from "./book-price.ts";
 
-export interface McpCall {
-  (name: string, args: Record<string, unknown>): Promise<Record<string, unknown>>;
-}
+export type McpCall = (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
 const previewSchema = z.object({
   previewId: z.uuid(), previewHash: hashSchema, disposition: z.enum(["immediate", "resting", "conditional"]),
@@ -50,7 +48,7 @@ const post = async (call: McpCall, request: Record<string, unknown>, expected: {
   if (expected.matching !== undefined && preview.matching?.outcome !== expected.matching) {
     throw new Error(`Expected matching ${expected.matching}, got ${preview.matching?.outcome ?? "null"}`);
   }
-  if (preview.safety.safe !== true) throw new Error(`Preview is not safe: ${preview.safety.verdict}`);
+  if (!preview.safety.safe) throw new Error(`Preview is not safe: ${preview.safety.verdict}`);
   const submitted = submissionSchema.parse(await call("post_trade", { previewId: preview.previewId, previewHash: preview.previewHash }));
   return { preview, submitted };
 };
@@ -125,7 +123,7 @@ export const runTradeScenarios = async (call: McpCall): Promise<readonly Scenari
     throw new Error("FOK against thin depth was accepted");
   } catch (error: unknown) {
     if (error instanceof Error && error.message === "FOK against thin depth was accepted") throw error;
-    if (!(error instanceof Error) || !/fok-unfillable/u.test(error.message)) {
+    if (!(error instanceof Error) || !error.message.includes("fok-unfillable")) {
       throw error instanceof Error ? error : new Error("FOK rejection produced an unexpected failure");
     }
     records.push({ name: "fokThinBook", rejected: true });

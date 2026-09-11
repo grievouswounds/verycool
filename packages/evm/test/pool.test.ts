@@ -250,7 +250,9 @@ describe("pooled RPC transport", () => {
         const body = rpcBodySchema.parse(JSON.parse(requestBody(init)));
         if (url.includes("slow")) {
           await new Promise((_, reject) => {
-            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+            init?.signal?.addEventListener("abort", () => {
+              reject(new Error("aborted"));
+            }, { once: true });
           });
         }
         if (body.method === "eth_chainId") return success(body.id, chainIdHex);

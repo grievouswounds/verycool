@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const url = new URL(Bun.env["AQUA_SPECULOS_URL"] ?? "http://127.0.0.1:5000");
 const screenSchema = z.object({
-  events: z.array(z.object({ text: z.unknown().optional() }).loose()).optional(),
+  events: z.array(z.object({ text: z.string().optional() }).loose()).optional(),
 }).loose();
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -10,7 +10,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 const currentScreen = async (): Promise<string> => {
   const body = screenSchema.parse(await (await fetch(new URL("/events?currentscreenonly=true", url))).json());
   const events = body.events ?? [];
-  return events.map((event) => String(event.text ?? "").trim()).filter((line) => line.length > 0).join("\n");
+  return events.map((event) => (event.text ?? "").trim()).filter((line) => line.length > 0).join("\n");
 };
 
 const press = async (button: "left" | "right" | "both"): Promise<void> => {

@@ -8,7 +8,10 @@ export default defineConfig(
   ...tseslint.configs.stylisticTypeChecked,
   {
     languageOptions: {
-      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+      parserOptions: {
+        projectService: { allowDefaultProject: ["apps/mcp-bridge/src/*.mjs"] },
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     rules: {
       "@typescript-eslint/no-explicit-any": "error",
@@ -24,8 +27,17 @@ export default defineConfig(
     }
   },
   {
-    files: ["apps/mcp-bridge/src/ledger-runtime.mjs"],
+    files: ["apps/mcp-bridge/src/*.mjs"],
     ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      globals: {
+        AbortController: "readonly",
+        console: "readonly",
+        fetch: "readonly",
+        process: "readonly",
+        setTimeout: "readonly",
+      },
+    },
   },
-  { ignores: ["**/dist/**", "apps/*/bundle/**", "node_modules/**", "result*/**"] }
+  { ignores: ["**/dist/**", "apps/*/bundle/**", "node_modules/**", "out/**", "result*/**"] }
 );

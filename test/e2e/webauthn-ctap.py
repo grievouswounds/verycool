@@ -166,7 +166,7 @@ def main() -> None:
                 [{"type": "public-key", "alg": -7}],
                 None,
                 None,
-                {"rk": True, "uv": True},
+                {"rk": False, "uv": True},
             )
             credential_id = bytes(attestation.auth_data.credential_data.credential_id)
             attestation_bytes = attestation_object_bytes(attestation)

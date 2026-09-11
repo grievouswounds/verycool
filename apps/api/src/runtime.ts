@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { AquaProtocolGateway, AuthService, LedgerWebAuthnService, OAuthService, PostgresActivityRepository, PostgresAuthStore, PostgresLedgerWebAuthnStore, PostgresTradingRepository, createDatabase, closeDatabase } from "@aqua/adapters";
+import { AquaProtocolGateway, AuthService, LedgerWebAuthnService, OAuthService, AgentVault, parseAgentKek, PostgresActivityRepository, PostgresAuthStore, PostgresLedgerWebAuthnStore, PostgresTradingRepository, createDatabase, closeDatabase } from "@aqua/adapters";
 import { ActivityService, RpcActivityChain } from "@aqua/activity";
 import { loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
 import type { RuntimeManifest } from "@aqua/core";
@@ -46,7 +46,7 @@ export const createApiRuntime = async (argv: readonly string[] = Bun.argv): Prom
     new PostgresLedgerWebAuthnStore(database), manifest.auth.rpId, manifest.auth.origin,
     e2eAttestationRootPath === undefined ? {} : { attestationRoots: [await readFile(e2eAttestationRootPath, "utf8")] },
   );
-  const oauth = new OAuthService(database, manifest.auth.resource, (grant) => broker.issuePaseto({ address: grant.owner, sessionId: crypto.randomUUID(), scopes: grant.scopes, amr: ["fido2", "hwk"], clientId: grant.clientId }));
+  const oauth = new OAuthService(database, manifest.auth.resource, manifest.auth.issuer, (grant) => broker.issuePaseto({ address: grant.owner, sessionId: crypto.randomUUID(), scopes: grant.scopes, amr: ["fido2", "hwk"], clientId: grant.clientId }));
   const protocol = new ProtocolService({
     chainId: manifest.chain.id, aqua: manifest.contracts.aqua.address,
     aquaSwapRouter: manifest.contracts.aquaSwapRouter.address,
@@ -71,6 +71,8 @@ export const createApiRuntime = async (argv: readonly string[] = Bun.argv): Prom
     return session.sendRawTransaction(raw);
   } });
   await tradeApi.initialize();
+  const kekValue = Bun.env["AQUA_AGENT_KEK"]?.trim();
+  const agentVault = kekValue === undefined || kekValue.length === 0 ? null : new AgentVault(database, parseAgentKek(kekValue));
   const readiness = async (): Promise<boolean> => {
     const pool = rpc.snapshot();
     if (pool.healthy === 0) return false;
@@ -85,7 +87,7 @@ export const createApiRuntime = async (argv: readonly string[] = Bun.argv): Prom
     return true;
   };
   const apiUrl = new URL(manifest.services.apiUrl);
-  const options = createServerOptions({ trading, tradeApi, auth, activity, webauthn, oauth, quoter, manifest, corsOrigin: manifest.auth.origin, readiness, issuer: manifest.auth.issuer, resource: manifest.auth.resource });
+  const options = createServerOptions({ trading, tradeApi, auth, activity, webauthn, oauth, quoter, agentVault, rpc, manifest, corsOrigin: manifest.auth.origin, readiness, issuer: manifest.auth.issuer, resource: manifest.auth.resource });
   Object.assign(options, { hostname: Bun.env["AQUA_BIND_HOST"]?.trim() ?? "127.0.0.1", port: Number(apiUrl.port === "" ? "80" : apiUrl.port) });
   return {
     manifest, broker, options,

@@ -82,7 +82,9 @@ describe("atomic Ledger keyring bootstrap", () => {
 
   test("generates three EVM keys and one Ed25519 PASETO secret, then reuses them", async () => {
     const item = await fixture();
-    expect((await invoke(item)).exitCode).toBe(0);
+    const result = await invoke(item);
+    if (result.exitCode !== 0) throw new Error(result.stderr.length > 0 ? result.stderr : result.stdout);
+    expect(result.exitCode).toBe(0);
     for (const name of ["agent", "facilitator", "keeper", "paseto"]) {
       expect(await Bun.file(`${item.state}/keyring/${name}.enc`).exists()).toBe(true);
     }

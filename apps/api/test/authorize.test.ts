@@ -25,8 +25,13 @@ describe("authorize page renderers", () => {
     const address = "0x1111111111111111111111111111111111111111";
     const html = renderAppErrorFragment(new AppError(404, "urn:aqua:error:webauthn-credential", "missing"), address);
     expect(html).toContain("Not on the guest list");
-    expect(html).toContain("bun scripts/enroll-ledger.ts");
+    expect(html).toContain("bun scripts/setup-hosted-owner.ts");
     expect(html).toContain(address);
+  });
+
+  test("idle copy sends MCP Jam back with iss rather than a CLI loopback", () => {
+    expect(authorizePageHtml).toContain("MCP Jam");
+    expect(authorizePageHtml).not.toContain("loopback listener the CLI is holding open");
   });
 
   test("maps AppError types to themed fragments", () => {

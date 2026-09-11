@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { z } from "zod";
 
 const keyPath = Bun.env["AQUA_BAZANTIC_FIXTURE_KEY"];
 const certPath = Bun.env["AQUA_BAZANTIC_FIXTURE_CERT"];
@@ -15,6 +16,11 @@ const tools = [
   ["unsubscribeFromUser", ["address"]],
   ["wipeSubscribedTrades", ["scope"]],
 ] as const;
+const rpcBodySchema = z.object({
+  id: z.unknown().optional(),
+  method: z.unknown().optional(),
+  params: z.object({ name: z.unknown().optional() }).loose().optional(),
+}).loose();
 let catalogRequests = 0;
 let listRequests = 0;
 let paidRequests = 0;
@@ -29,7 +35,7 @@ const server = Bun.serve({
     const url = new URL(request.url);
     if (new Headers(request.headers).has("payment-signature")) paidRequests += 1;
     if (url.pathname === "/evidence") return Response.json({ catalogRequests, listRequests, paidRequests });
-    const body = await request.json() as { readonly id?: unknown; readonly method?: unknown; readonly params?: { readonly name?: unknown } };
+    const body = rpcBodySchema.parse(JSON.parse(await request.text()));
     if (url.pathname === "/catalog" && body.method === "tools/call" && body.params?.name === "get_gateway") {
       catalogRequests += 1;
       return sse({ jsonrpc: "2.0", id: body.id, result: { content: [], structuredContent: { found: true, gateway: {

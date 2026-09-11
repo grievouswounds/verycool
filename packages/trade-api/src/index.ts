@@ -94,7 +94,6 @@ const matchingSchema = z.object({
 }).strict();
 const applyBps = (price: string, bps: string, worse: boolean): string => {
   const [whole = "0", fraction = ""] = price.split(".");
-  const scale = 10n ** BigInt(fraction.length);
   const value = BigInt(`${whole}${fraction}`);
   const next = worse ? value * (10_000n - BigInt(bps)) / 10_000n : value * (10_000n + BigInt(bps)) / 10_000n;
   if (next === 0n) return "0";
@@ -136,6 +135,13 @@ export class TradeApiService {
   ) { this.db = db; this.rpc = rpc; this.trading = trading; this.quoter = quoter; this.manifest = manifest; this.relay = relay; this.facilitator = new HTTPFacilitatorClient({ url: manifest.services.facilitatorUrl, timeoutMs: 30_000 }); }
 
   public async initialize(): Promise<void> { await this.db`SELECT 1`; }
+
+  public async reviewedPreview(previewId: string, owner: Address): Promise<Readonly<Record<string, unknown>>> {
+    const previews = await this.db<PreviewRow[]>`SELECT id,preview_hash,owner,agent,state,request,response,lifecycle_nonce,expires_at,submitted_at FROM trade_previews WHERE id=${previewId}`;
+    const preview = previews[0];
+    if (preview?.owner !== owner) throw new AppError(404, "urn:aqua:error:preview", "Trade preview was not found");
+    return jsonObject(preview.response, "Preview response");
+  }
 
   public async createAgentChallenge(owner: Address, agent: Address) {
     const id = crypto.randomUUID(); const nonce = randomHash(); const expiresAt = new Date(Date.now() + 300_000);
@@ -284,17 +290,30 @@ export class TradeApiService {
       legs.push({ role, action: encoded.action, triggerPrice, trail, activationPrice });
     };
     const policy = request.policy;
-    if (policy.kind === "stopMarket" || policy.kind === "takeProfitMarket") {
-      const worse = policy.kind === "stopMarket";
-      await encodeLeg(policy.kind === "stopMarket" ? "stop" : "takeProfit", applyBps(policy.triggerPrice, policy.slippageBps, worse), policy.triggerPrice, null, null);
-    } else if (policy.kind === "stopLimit" || policy.kind === "takeProfitLimit") {
-      await encodeLeg(policy.kind === "stopLimit" ? "stop" : "takeProfit", policy.limitPrice, policy.triggerPrice, null, null);
-    } else if (policy.kind === "trailingStop") {
-      await encodeLeg("trailing", applyBps("1", policy.slippageBps, true), null, policy.trail, policy.activationPrice ?? null);
-    } else if (policy.kind === "oco" || policy.kind === "bracket") {
-      const stopLimit = policy.kind === "oco" ? (policy.limitPrice ?? policy.stopLossPrice) : policy.stopLossPrice;
-      await encodeLeg("stop", stopLimit, policy.stopLossPrice, null, null);
-      await encodeLeg("takeProfit", policy.takeProfitPrice, policy.takeProfitPrice, null, null);
+    switch (policy.kind) {
+      case "stopMarket":
+      case "takeProfitMarket": {
+        const worse = policy.kind === "stopMarket";
+        await encodeLeg(policy.kind === "stopMarket" ? "stop" : "takeProfit", applyBps(policy.triggerPrice, policy.slippageBps, worse), policy.triggerPrice, null, null);
+        break;
+      }
+      case "stopLimit":
+      case "takeProfitLimit":
+        await encodeLeg(policy.kind === "stopLimit" ? "stop" : "takeProfit", policy.limitPrice, policy.triggerPrice, null, null);
+        break;
+      case "trailingStop":
+        await encodeLeg("trailing", applyBps("1", policy.slippageBps, true), null, policy.trail, policy.activationPrice ?? null);
+        break;
+      case "oco":
+        await encodeLeg("stop", policy.limitPrice ?? policy.stopLossPrice, policy.stopLossPrice, null, null);
+        await encodeLeg("takeProfit", policy.takeProfitPrice, policy.takeProfitPrice, null, null);
+        break;
+      case "bracket":
+        await encodeLeg("stop", policy.stopLossPrice, policy.stopLossPrice, null, null);
+        await encodeLeg("takeProfit", policy.takeProfitPrice, policy.takeProfitPrice, null, null);
+        break;
+      default:
+        break;
     }
     const first = legs[0]?.action;
     if (first === undefined) throw new AppError(422, "urn:aqua:error:conditional-plan", "Conditional policy did not produce an armed vault action");
@@ -488,6 +507,12 @@ export class TradeApiService {
 
   private submissionBody(id: string, status: string, tradeHash: Hash | null, fundingHash: Hash | null, prerequisiteTransactions: readonly Hash[], deploymentHash: Hash | null = null): Readonly<Record<string, unknown>> { return { tradeId: id, status, tradeTransactionHash: tradeHash, fundingTransactionHash: fundingHash, prerequisiteTransactionHashes: deploymentHash === null ? prerequisiteTransactions : [...prerequisiteTransactions, deploymentHash] }; }
 
+  public async fixtureDelegations(owner: Address, tokens: readonly Address[]): Promise<readonly { readonly token: Address; readonly delegated: boolean; readonly validUntil: string | null }[]> {
+    const rows = await this.db<{ token: Address; valid_until: Date }[]>`SELECT token,valid_until FROM delegation_projections WHERE owner=${owner} AND valid_until>now()`;
+    const active = new Map(rows.map((row) => [row.token.toLowerCase(), row.valid_until.toISOString()]));
+    return tokens.map((token) => ({ token, delegated: active.has(token.toLowerCase()), validUntil: active.get(token.toLowerCase()) ?? null }));
+  }
+
   public async listTrades(query: TradesListQuery, owner: Address) {
     const cursorSchema = z.object({ at: z.iso.datetime({ offset: true }), id: z.string().min(1) }).strict();
     const cursor = query.cursor === undefined ? null : cursorSchema.parse(JSON.parse(Buffer.from(query.cursor, "base64url").toString("utf8")));
@@ -533,7 +558,7 @@ export class TradeApiService {
   public async submitCancellation(tradeId: string, cancellationId: string, owner: Address, signature: Hex) {
     const rows = await this.db<{ id: string; trade_id: string; cancellation_hash: Hash; action_payload: unknown; typed_data: unknown; expires_at: Date; used_at: Date | null }[]>`SELECT id,trade_id,cancellation_hash,action_payload,typed_data,expires_at,used_at FROM trade_cancellations WHERE id=${cancellationId} AND trade_id=${tradeId}`;
     const cancellation = rows[0];
-    if (cancellation === undefined || cancellation.used_at !== null || cancellation.expires_at <= new Date()) throw new AppError(409, "urn:aqua:error:cancellation", "Cancellation is missing, expired, or already used");
+    if (cancellation?.used_at !== null || cancellation.expires_at <= new Date()) throw new AppError(409, "urn:aqua:error:cancellation", "Cancellation is missing, expired, or already used");
     const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions FROM agent_order_operations WHERE id=${tradeId} AND owner=${owner}`;
     const operation = operations[0];
     if (operation === undefined) throw new AppError(404, "urn:aqua:error:trade", "Trade was not found");

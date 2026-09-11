@@ -35,7 +35,7 @@ export class AuthService {
     if (challenge?.message !== message) throw new AppError(409, "urn:aqua:error:challenge", "Challenge is invalid, expired, or already used");
     try {
       if (recoverPersonalAddress(message, signature) === challenge.address) {
-        return this.issue(challenge.address, randomUUID());
+        return await this.issue(challenge.address, randomUUID());
       }
     } catch { /* contract wallets are verified with EIP-1271 below */ }
     const code = await this.rpc.getCode(challenge.address);

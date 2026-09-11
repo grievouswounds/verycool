@@ -7,7 +7,7 @@ import { z } from "zod";
 
 const output = Bun.env["AQUA_E2E_REPORT"];
 const rpcUrl = Bun.env["AQUA_LOCAL_RPC_URL"] ?? Bun.env["AQUA_RPC_URL"];
-const mcpPath = Bun.env["AQUA_MCP_REPORT"] ?? `${new URL("../../reports/e2e/mcp.json", import.meta.url).pathname}`;
+const mcpPath = Bun.env["AQUA_MCP_REPORT"] ?? new URL("../../reports/e2e/mcp.json", import.meta.url).pathname;
 const ownerEvidence = Bun.env["AQUA_LEDGER_OWNER_EVIDENCE"];
 const manifestPath = Bun.env["AQUA_RUNTIME_MANIFEST"];
 if (output === undefined || rpcUrl === undefined || ownerEvidence === undefined || manifestPath === undefined) {

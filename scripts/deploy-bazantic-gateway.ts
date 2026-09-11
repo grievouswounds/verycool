@@ -1,24 +1,21 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
 import { mkdir, unlink } from "node:fs/promises";
-import { hexSchema, parseRuntimeManifest, runtimeManifestHash, type Hex, type RuntimeManifest } from "@aqua/core";
-import { signPersonalMessage, signingKeyAddress } from "@aqua/evm";
+import { parseRuntimeManifest, runtimeManifestHash, type RuntimeManifest } from "@aqua/core";
+import { parseAgentKek } from "@aqua/adapters";
 import { z } from "zod";
 import { applyLedgerMode, parseLedgerArgv } from "./ledger-mode.ts";
 
 export const GATEWAY_NAME = "Aqua transaction preparation API";
-/** Foundry Anvil account 0; used only against the local SIWE issuer. */
-export const ANVIL_ACCOUNT_ZERO_KEY = hexSchema.parse("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
+export const PINNED_PUBLIC_ORIGIN = "https://vercel-henna-gamma-46.vercel.app";
 export const VERCEL_STAGING_DIR = "out/vercel";
 export const HOSTED_VERCEL_CONFIG = {
   $schema: "https://openapi.vercel.sh/vercel.json",
   bunVersion: "1.x",
   framework: "bun",
-  functions: { "src/server.js": { maxDuration: 60 } },
+  functions: { "src/server.js": { maxDuration: 300 } },
 } as const;
 
-const challengeResponseSchema = z.object({ challengeId: z.uuid(), message: z.string().min(1) }).loose();
-const sessionResponseSchema = z.object({ accessToken: z.string().min(1), expiresIn: z.number().int().positive() }).loose();
 const whoamiSchema = z.object({
   ok: z.boolean(),
   signedIn: z.boolean(),
@@ -35,11 +32,34 @@ const openApiSchema = z.object({
   paths: z.record(z.string(), z.unknown()),
 }).loose();
 
-export const parseVercelDeploymentUrl = (text: string): string | undefined => {
+const fail = (message: string): never => {
+  throw new Error(message);
+};
+
+export const parseAliasedVercelUrl = (text: string): string | undefined => {
   const aliased = /Aliased\s+(https:\/\/[a-z0-9.-]+\.vercel\.app)/u.exec(text);
-  if (aliased?.[1] !== undefined) return aliased[1];
-  const match = /https:\/\/[a-z0-9.-]+\.vercel\.app/u.exec(text);
-  return match?.[0];
+  return aliased?.[1];
+};
+
+export const parseVercelDeploymentUrl = (text: string): string | undefined => {
+  return parseAliasedVercelUrl(text);
+};
+
+export const requirePublicOrigin = (env: NodeJS.ProcessEnv): string => {
+  const publicOrigin = (env["AQUA_PUBLIC_ORIGIN"] ?? "").trim().replace(/\/$/u, "");
+  if (publicOrigin.length === 0) return fail("AQUA_PUBLIC_ORIGIN is required and is the sole public host");
+  const vercelUrl = (env["AQUA_VERCEL_URL"] ?? "").trim().replace(/\/$/u, "");
+  if (vercelUrl.length > 0 && vercelUrl !== publicOrigin) {
+    return fail(`AQUA_VERCEL_URL ${vercelUrl} disagrees with AQUA_PUBLIC_ORIGIN ${publicOrigin}`);
+  }
+  return publicOrigin;
+};
+
+export const assertAliasedOrigin = (log: string, expected: string): string => {
+  const aliased = parseAliasedVercelUrl(log);
+  if (aliased === undefined) return fail("vercel deploy did not print an Aliased https://*.vercel.app host");
+  if (aliased !== expected) return fail(`Aliased host ${aliased} differs from AQUA_PUBLIC_ORIGIN ${expected}. Never enrol against a unique *.vercel.app URL.`);
+  return aliased;
 };
 
 export const rewriteManifestPublicOrigin = (manifest: RuntimeManifest, origin: string): RuntimeManifest => {
@@ -54,10 +74,6 @@ export const rewriteManifestPublicOrigin = (manifest: RuntimeManifest, origin: s
   delete unsigned.manifestHash;
   const parsed = parseRuntimeManifest(JSON.stringify(unsigned));
   return parseRuntimeManifest(JSON.stringify({ ...parsed, manifestHash: runtimeManifestHash(parsed) }));
-};
-
-const fail = (message: string): never => {
-  throw new Error(message);
 };
 
 const envOr = (name: string, fallback: string): string => {
@@ -96,33 +112,10 @@ const waitForPublicOrigin = async (origin: string): Promise<void> => {
   fail(`Public origin ${origin} did not serve /health/live and /openapi.json`);
 };
 
-const mintSiweAccessToken = async (origin: string, signingKey: Hex): Promise<string> => {
-  const address = signingKeyAddress(signingKey);
-  const challenge = challengeResponseSchema.parse(await jsonBody(await fetch(new URL("/v1/auth/challenges", origin), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ address }),
-  }), "auth challenge"));
-  const signature = signPersonalMessage(signingKey, challenge.message);
-  const session = sessionResponseSchema.parse(await jsonBody(await fetch(new URL("/v1/auth/sessions", origin), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ challengeId: challenge.challengeId, message: challenge.message, signature }),
-  }), "auth session"));
-  return session.accessToken;
-};
-
 const teeText = async (stream: ReadableStream<Uint8Array>, dest: NodeJS.WriteStream): Promise<string> => {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value === undefined) continue;
-    chunks.push(value);
-    dest.write(value);
-  }
-  return Buffer.concat(chunks).toString("utf8");
+  const buffer = Buffer.from(await new Response(stream).arrayBuffer());
+  dest.write(buffer);
+  return buffer.toString("utf8");
 };
 
 const runCaptured = async (command: string, args: readonly string[], options: { stdin?: string } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
@@ -182,14 +175,12 @@ const upsertVercelEnv = async (cwd: string, name: string, value: string, environ
   if (added.exitCode !== 0) fail(`vercel env add ${name} failed:\n${added.stderr}\n${added.stdout}`);
 };
 
-export const deployToVercel = async (staging: string): Promise<string> => {
+export const deployToVercel = async (staging: string, expectedOrigin: string): Promise<string> => {
   const [cli, ...prefix] = vercelCli();
   console.error(`deploying ${staging} to Vercel production`);
   const deployed = await runCaptured(cli, [...prefix, "deploy", "--prod", "--yes", "--cwd", staging]);
   if (deployed.exitCode !== 0) fail(`vercel deploy failed:\n${deployed.stderr}\n${deployed.stdout}`);
-  const url = parseVercelDeploymentUrl(`${deployed.stdout}\n${deployed.stderr}`);
-  if (url === undefined) return fail(`vercel deploy did not print a *.vercel.app URL\n${deployed.stdout}\n${deployed.stderr}`);
-  return url;
+  return assertAliasedOrigin(`${deployed.stdout}\n${deployed.stderr}`, expectedOrigin);
 };
 
 const loadProductionManifest = async (stateDir: string): Promise<RuntimeManifest> => {
@@ -200,12 +191,6 @@ const loadProductionManifest = async (stateDir: string): Promise<RuntimeManifest
     return fail(`Missing ${path}. Run bun scripts/deploy-public-chain.ts first so it can reuse the pinned Sepolia contracts and write that file.`);
   }
   return parseRuntimeManifest(await Bun.file(path).text());
-};
-
-const writeSecretFile = async (path: string, contents: string): Promise<void> => {
-  await Bun.write(path, contents);
-  const { chmod } = await import("node:fs/promises");
-  await chmod(path, 0o600);
 };
 
 const pooledDatabaseUrl = (): string => {
@@ -223,7 +208,7 @@ const deploy = async (): Promise<void> => {
   const parsed = parseLedgerArgv(Bun.argv.slice(2));
   if (parsed.explicit) applyLedgerMode(parsed.mode, Bun.env);
   const stateDir = envOr("AQUA_STATE_DIR", `${process.cwd()}/.data`);
-  const signingKey = hexSchema.parse(envOr("AQUA_DEPLOY_SIGNING_KEY", ANVIL_ACCOUNT_ZERO_KEY));
+  const origin = requirePublicOrigin(Bun.env);
   await mkdir(stateDir, { recursive: true });
   const databaseUrl = pooledDatabaseUrl();
   Bun.env["DATABASE_URL"] = databaseUrl;
@@ -241,8 +226,7 @@ const deploy = async (): Promise<void> => {
   const migrate = await runCaptured(requireCommand("bun", "Install Bun to run migrations."), ["scripts/migrate.ts"]);
   if (migrate.exitCode !== 0) fail(`database migration failed:\n${migrate.stderr}\n${migrate.stdout}`);
 
-  let manifest = await loadProductionManifest(stateDir);
-  const existingOrigin = Bun.env["AQUA_VERCEL_URL"]?.trim();
+  const manifest = rewriteManifestPublicOrigin(await loadProductionManifest(stateDir), origin);
   console.error("bundling hosted API");
   const staging = await buildVercelBundle(process.cwd());
   const pushRuntimeEnv = async (current: RuntimeManifest): Promise<void> => {
@@ -250,51 +234,37 @@ const deploy = async (): Promise<void> => {
     const facilitator = envOr("AQUA_FACILITATOR_KEY", "");
     const keeper = envOr("AQUA_KEEPER_KEY", "");
     const paseto = envOr("PASETO_V4_SECRET_KEY", "");
+    const kek = envOr("AQUA_AGENT_KEK", "");
     if (agent.length === 0 || facilitator.length === 0 || keeper.length === 0 || paseto.length === 0) {
       fail("AQUA_AGENT_KEY, AQUA_FACILITATOR_KEY, AQUA_KEEPER_KEY, and PASETO_V4_SECRET_KEY are required for AQUA_SIGNER=env");
     }
+    parseAgentKek(kek);
     await upsertVercelEnv(staging, "DATABASE_URL", databaseUrl);
     await upsertVercelEnv(staging, "AQUA_RUNTIME_MANIFEST", JSON.stringify(current));
     await upsertVercelEnv(staging, "AQUA_SIGNER", "env");
     await upsertVercelEnv(staging, "AQUA_AGENT_KEY", agent);
+    await upsertVercelEnv(staging, "AQUA_AGENT_KEK", kek);
     await upsertVercelEnv(staging, "AQUA_FACILITATOR_KEY", facilitator);
     await upsertVercelEnv(staging, "AQUA_KEEPER_KEY", keeper);
     await upsertVercelEnv(staging, "PASETO_V4_SECRET_KEY", paseto);
+    await upsertVercelEnv(staging, "AQUA_PUBLIC_ORIGIN", origin);
   };
-  let origin: string;
   if (!existsSync(`${staging}/.vercel/project.json`)) {
     console.error("creating hosted API Vercel project");
-    origin = await deployToVercel(staging);
   }
-  if (existingOrigin !== undefined && existingOrigin.length > 0) {
-    origin = existingOrigin.replace(/\/$/u, "");
-    manifest = rewriteManifestPublicOrigin(manifest, origin);
-    await pushRuntimeEnv(manifest);
-    origin = await deployToVercel(staging);
-  } else {
-    await pushRuntimeEnv(manifest);
-    origin = await deployToVercel(staging);
-    const rewritten = rewriteManifestPublicOrigin(manifest, origin);
-    if (rewritten.services.apiUrl !== manifest.services.apiUrl) {
-      manifest = rewritten;
-      await pushRuntimeEnv(manifest);
-      origin = await deployToVercel(staging);
-    } else {
-      manifest = rewritten;
-    }
-  }
+  await pushRuntimeEnv(manifest);
+  const deployedOrigin = await deployToVercel(staging, origin);
+  if (deployedOrigin !== origin) fail(`Deployed alias ${deployedOrigin} is not AQUA_PUBLIC_ORIGIN ${origin}`);
 
   console.error(`waiting for ${origin} /health/live`);
   await waitForPublicOrigin(origin);
-  const token = await mintSiweAccessToken(origin, signingKey);
-  const tokenPath = `${stateDir}/bazantic-access.token`;
-  await writeSecretFile(tokenPath, token);
+  const authType = Bun.env["AQUA_BAZANTIC_AUTH_TYPE"]?.trim() === "api-key" ? "api-key" : "x402-mpp";
   const created = gatewayAddSchema.parse(await runJson("baz", [
     "gateway", "add",
-    "--spec-url", `${origin}/openapi.json`,
+    "--spec-url", `${origin}/openapi.gateway.json`,
     "--endpoint", origin,
     "--name", GATEWAY_NAME,
-    "--auth-type", "api-key",
+    "--auth-type", authType,
     "--status", "draft",
     "--json",
   ]));
@@ -304,10 +274,9 @@ const deploy = async (): Promise<void> => {
     mcpUrl: created.mcpUrl,
     origin,
     name: GATEWAY_NAME,
-    tokenPath,
     dashboard: "https://bazantic.com",
     mcpJam: {
-      http: { transport: "streamable-http", url: created.mcpUrl },
+      http: { transport: "streamable-http", url: `${origin}/mcp` },
       stdio: {
         command: "bun",
         args: ["apps/mcp-bridge/src/main.ts"],
@@ -327,11 +296,12 @@ const deploy = async (): Promise<void> => {
     slug: created.slug,
     mcpUrl: created.mcpUrl,
     origin,
-    tokenPath,
+    mcpJamUrl: `${origin}/mcp`,
     next: [
-      "Open the Bazantic dashboard, set API key delivery to bearer, paste the token file, set prices, and activate.",
-      "MCP Jam HTTP: add mcpUrl as Streamable HTTP after activation; tools/call returns 402.",
-      "MCP Jam STDIO: bun apps/mcp-bridge/src/main.ts with AQUA_API_URL pointing at the Vercel origin and a hardware-AMR token.",
+      "Open the Bazantic dashboard, set prices, and activate the trimmed gateway spec.",
+      `MCP Jam HTTP: add ${origin}/mcp as Streamable HTTP (OAuth). Do not use a unique *.vercel.app URL.`,
+      "MCP Jam STDIO: bun apps/mcp-bridge/src/main.ts with AQUA_API_URL pointing at the pinned origin.",
+      "Delete probe gateway 7cjtotejxfb63n74uqsrqx2xmi from the Bazantic dashboard.",
     ],
   }, null, 2));
 };

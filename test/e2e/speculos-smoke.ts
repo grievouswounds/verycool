@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { z } from "zod";
 
 const url = new URL(Bun.env["AQUA_SPECULOS_URL"] ?? "http://127.0.0.1:5000");
 const app = Bun.env["AQUA_SPECULOS_APP"];
@@ -16,7 +17,7 @@ if (probe !== "") {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ data: probe }),
   });
   if (!response.ok) throw new Error(`${app} Speculos APDU returned HTTP ${String(response.status)}`);
-  const body = await response.json() as { readonly data?: string };
+  const body = z.object({ data: z.string().optional() }).loose().parse(JSON.parse(await response.text()));
   if (typeof body.data !== "string" || !body.data.toLowerCase().endsWith("9000")
     || !body.data.toLowerCase().includes(expected.toLowerCase())) throw new Error(`${app} rejected its application-specific APDU`);
   applicationInfoApdu = body.data;
