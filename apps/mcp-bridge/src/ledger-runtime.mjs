@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { genuineCheckRequired, rewriteGenuineCheckFailure } from "./genuine-check.ts";
 import "./json-bigint.mjs";
 import { ContextModuleBuilder, ContextModuleChainID } from "@ledgerhq/context-module";
 import { DeviceActionStatus, DeviceManagementKitBuilder, DeviceModelId, UserInteractionRequired } from "@ledgerhq/device-management-kit";
@@ -52,8 +53,9 @@ const createSigner = (dmk, sessionId, onReport) => {
     .build();
   return new SignerEthBuilder({ dmk, sessionId, originToken }).withContextModule(contextModule).build();
 };
+const genuineCheckState = { passed: false };
 const assertGenuine = async () => {
-  if (process.env.AQUA_E2E === "1") return;
+  if (!genuineCheckRequired(genuineCheckState, process.env.AQUA_E2E)) return;
   const walletCli = process.env.AQUA_WALLET_CLI ?? "wallet-cli";
   await new Promise((resolve, reject) => {
     const child = spawn(walletCli, ["genuine-check", "--output", "json"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -63,9 +65,10 @@ const assertGenuine = async () => {
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve(undefined);
-      else reject(new Error(`Ledger genuine check failed: ${chunks.join("").trim()}`));
+      else reject(new Error(rewriteGenuineCheckFailure(chunks.join(""))));
     });
   });
+  genuineCheckState.passed = true;
 };
 const withLedger = async (operation) => {
   const requestedTransport = process.env.AQUA_LEDGER_TRANSPORT ?? "node-hid";
@@ -74,6 +77,7 @@ const withLedger = async (operation) => {
   const transportFactory = requestedTransport === "speculos"
     ? speculosTransportFactory(process.env.AQUA_SPECULOS_URL ?? "http://127.0.0.1:5000", true, DeviceModelId.NANO_SP)
     : nodeHidTransportFactory;
+  await assertGenuine();
   const dmk = new DeviceManagementKitBuilder().addTransport(transportFactory).build();
   console.error(requestedTransport === "speculos" ? "Connecting to the E2E Speculos Ledger." : "Connect and unlock the Ledger owner device.");
   const devices = await firstValueFrom(dmk.listenToAvailableDevices({}).pipe(filter((items) => items.length > 0), timeout(deviceTimeoutMs)));
@@ -86,7 +90,6 @@ const withLedger = async (operation) => {
   const speculosUrl = process.env.AQUA_SPECULOS_URL ?? "http://127.0.0.1:5000";
   const masher = requestedTransport === "speculos" ? mashSpeculos(speculosUrl, stop.signal) : Promise.resolve();
   try {
-    await assertGenuine();
     let verdict = null;
     const signer = createSigner(dmk, sessionId, (params) => { verdict = params; });
     const { address } = await runAction(signer.getAddress(derivationPath, { checkOnDevice: false }));

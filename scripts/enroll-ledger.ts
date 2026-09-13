@@ -20,14 +20,14 @@ export const ctapHelper = async (request: Readonly<Record<string, unknown>>): Pr
   const python = Bun.env["AQUA_PYTHON"] ?? fail("AQUA_PYTHON is unset. Enter the Nix shell with `nix develop` so python-fido2 is on PATH.");
   const helper = `${import.meta.dir}/../test/e2e/webauthn-ctap.py`;
   console.error(request["mode"] === "create"
-    ? "Open the Security Key app and approve Ledger FIDO2 registration."
+    ? "Quit the Ethereum app, open Security Key, then approve Ledger FIDO2 registration."
     : "Approve the Ledger FIDO2 assertion on the Security Key app.");
   const child = Bun.spawn([python, helper], { stdin: "pipe", stdout: "pipe", stderr: "inherit", env: Bun.env });
   await child.stdin.write(JSON.stringify(request));
   await child.stdin.end();
   const text = await new Response(child.stdout).text();
   if (await child.exited !== 0) {
-    fail(`webauthn-ctap.py failed: ${text}\nIf python-fido2 is missing, enter the Nix shell with \`nix develop\`.`);
+    fail(`webauthn-ctap.py failed: ${text}\nQuit Ethereum, open the Security Key app, keep USB connected. Physical USB needs --prod.`);
   }
   return z.record(z.string(), z.unknown()).parse(JSON.parse(text));
 };
@@ -44,7 +44,7 @@ export const enrollLedgerOwner = async (apiUrl: string): Promise<LedgerEnrollmen
   const probe = Bun.spawn([python, "-c", "import fido2"], { stdout: "ignore", stderr: "pipe" });
   if (await probe.exited !== 0) fail("python-fido2 is unavailable. Enter the Nix shell with `nix develop` and retry.");
   const origin = new URL(apiUrl).origin;
-  console.error("Open the Ethereum app and sign the SIWE enrollment challenge.");
+  console.error("Stay on the Ledger dashboard until genuine-check finishes. Open Ethereum only when the device shows Confirm opening the Ethereum app, then sign SIWE.");
   const owner = await ledgerOwnerAddress();
   const challenge = z.object({ challengeId: z.uuid(), message: z.string() }).loose()
     .parse(await json(await fetch(new URL("/v1/auth/challenges", apiUrl), {

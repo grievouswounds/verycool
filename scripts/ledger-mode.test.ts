@@ -27,8 +27,10 @@ describe("ledger mode flags", () => {
     expect(emulator["AQUA_E2E"]).toBe("1");
     expect(emulator["AQUA_LEDGER_TRANSPORT"]).toBe("speculos");
     expect(emulator["AQUA_WALLET_CLI"]).toBe("/repo/test/e2e/wallet-cli-adapter.ts");
+    expect(emulator["AQUA_E2E_PHYSICAL"]).toBeUndefined();
     const physical: NodeJS.ProcessEnv = {};
     applyLedgerMode("physical", physical);
     expect(physical["AQUA_LEDGER_TRANSPORT"]).toBe("node-hid");
+    expect(physical["AQUA_E2E_PHYSICAL"]).toBe("1");
   });
 });

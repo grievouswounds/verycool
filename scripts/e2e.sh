@@ -69,8 +69,10 @@ unset PGDATABASE PGHOST PGHOST_UNPOOLED PGUSER POSTGRES_DATABASE POSTGRES_HOST P
 work="$(mktemp -d "${TMPDIR:-/tmp}/aqua-e2e.XXXXXX")"
 processes=()
 cleanup() {
+  trap - EXIT INT TERM
   for pid in "${processes[@]:-}"; do kill "$pid" 2>/dev/null || true; done
-  wait 2>/dev/null || true
+  sleep 0.2
+  for pid in "${processes[@]:-}"; do kill -9 "$pid" 2>/dev/null || true; done
   rm -rf "$work"
 }
 trap cleanup EXIT INT TERM

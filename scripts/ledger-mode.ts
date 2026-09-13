@@ -65,8 +65,10 @@ export const applyLedgerMode = (mode: LedgerMode, env: NodeJS.ProcessEnv, root =
     env["AQUA_SPECULOS_URL"] ??= "http://127.0.0.1:5000";
     env["AQUA_WALLET_CLI"] ??= `${root}/test/e2e/wallet-cli-adapter.ts`;
     env["AQUA_E2E_LKRP_STATE"] ??= `${stateDir}/lkrp`;
+    delete env["AQUA_E2E_PHYSICAL"];
   } else {
     env["AQUA_LEDGER_TRANSPORT"] = "node-hid";
+    env["AQUA_E2E_PHYSICAL"] = "1";
   }
   return mode;
 };

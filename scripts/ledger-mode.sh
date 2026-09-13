@@ -85,7 +85,9 @@ aqua_apply_ledger_env() {
     export AQUA_SPECULOS_URL="${AQUA_SPECULOS_URL:-http://127.0.0.1:5000}"
     export AQUA_WALLET_CLI="${AQUA_WALLET_CLI:-$root/test/e2e/wallet-cli-adapter.ts}"
     export AQUA_E2E_LKRP_STATE="${AQUA_E2E_LKRP_STATE:-$state_dir/lkrp}"
+    unset AQUA_E2E_PHYSICAL
   else
     export AQUA_LEDGER_TRANSPORT=node-hid
+    export AQUA_E2E_PHYSICAL=1
   fi
 }

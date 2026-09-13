@@ -15,6 +15,7 @@ source = os.environ.get("AQUA_LEDGER_SECURITY_KEY_SOURCE")
 if source:
     sys.path.insert(0, os.path.join(source, "tests"))
 
+from ctap_hid import wait_for_ctap2_device
 from fido2.ctap2 import Ctap2  # noqa: E402
 
 
@@ -80,13 +81,20 @@ def mash_buttons(api_url: str, stop: threading.Event) -> None:
 
 
 def open_device():
-    physical = os.environ.get("AQUA_E2E_PHYSICAL") == "1"
+    physical = (
+        os.environ.get("AQUA_E2E_PHYSICAL") == "1"
+        or os.environ.get("AQUA_LEDGER") == "physical"
+        or os.environ.get("AQUA_LEDGER_TRANSPORT") == "node-hid"
+    )
     if physical:
         from fido2.hid import CtapHidDevice
-        devices = list(CtapHidDevice.list_devices())
-        if not devices:
-            raise RuntimeError("No physical CTAPHID Security Key is connected")
-        return devices[0]
+        return wait_for_ctap2_device(
+            CtapHidDevice.list_devices,
+            timeout_s=120,
+            sleep=time.sleep,
+            clock=time.monotonic,
+            warn=lambda message: print(message, file=sys.stderr),
+        )
     from functional.transport import TransportType  # noqa: E402
     from functional.transport.hid import LedgerCtapHidDevice  # noqa: E402
     os.environ.setdefault("SPECULOS_HOST", "127.0.0.1")
