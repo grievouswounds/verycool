@@ -6,9 +6,10 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { PayingHttpClient, parseHttpJson } from "@aqua/x402-client";
+import { awaitingDelegation } from "./post-trade-status.ts";
 import {
   MAX_SUBPROCESS_BYTES, addressSchema, formatTokenAmount, hashSchema, hexSchema, localProfileDefaults, parseStrictJson,
-  quantitySchema, readBoundedFileJson, readBoundedText, subscribedTradesWipeSchema, tradePreviewRequestSchema,
+  quantitySchema, readBoundedFileJson, readBoundedText, subscribedTradesWipeSchema, subscribedTradesWipeToolSchema, tradePreviewRequestSchema,
   tradesListQuerySchema,
 } from "@aqua/core";
 import type { Address, Hash, Hex } from "@aqua/core";
@@ -166,7 +167,7 @@ const ensureDelegation = async (session: Session, preview: Readonly<Record<strin
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ previewId: created.previewId, previewHash: created.previewHash, ownerSignature }),
   })));
-  await waitForReceipt(submitted.transactionHash); return submitted.transactionHash;
+  return submitted.transactionHash;
 };
 
 const ensureAgentBinding = async (session: Session): Promise<void> => {
@@ -181,38 +182,66 @@ const ensureAgentBinding = async (session: Session): Promise<void> => {
   }));
 };
 
+const ensureWalletPass = async (): Promise<void> => {
+  if ((Bun.env["WALLET_PASS"] ?? "").length > 0) return;
+  const passPath = `${stateRoot}/wallet-pass`;
+  try {
+    const existing = (await Bun.file(passPath).text()).trim();
+    if (existing.length > 0) {
+      Bun.env["WALLET_PASS"] = existing;
+      return;
+    }
+  } catch { /* first Jam session has no ring yet */ }
+  const password = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
+  await mkdir(stateRoot, { recursive: true, mode: 0o700 });
+  await writeFile(passPath, password, { mode: 0o600 });
+  Bun.env["WALLET_PASS"] = password;
+};
+
 const loadOrProvisionAgent = async (): Promise<string> => {
   const configured = Bun.env["AQUA_AGENT_ADDRESS"];
   if (configured !== undefined) return configured;
   try { return z.looseObject({ address: addressSchema }).parse(await readBoundedFileJson(metadataPath)).address; }
   catch {
+    await ensureWalletPass();
     const provision = Bun.spawn([process.execPath, signerProgram, "provision"], { stdin: "inherit", stdout: "pipe", stderr: "inherit", env: Bun.env });
-    const result = z.looseObject({ address: addressSchema }).parse(await childJson(provision.stdout));
-    if (await provision.exited !== 0) throw new Error("Ledger Key Ring agent provisioning failed");
-    return result.address;
+    const stdout = await readBoundedText(new Response(provision.stdout), MAX_SUBPROCESS_BYTES);
+    if (await provision.exited !== 0 || stdout.trim().length === 0) {
+      throw new Error("Ledger Key Ring agent provisioning failed. Reconnect stdio via scripts/aqua-mcp-jam.sh so WALLET_PASS is set.");
+    }
+    return z.looseObject({ address: addressSchema }).parse(parseStrictJson(stdout)).address;
   }
 };
 
-const ensureSession = (): Promise<Session> => {
-  sessionPromise ??= (async () => {
-    const accessToken = await oauthAccessToken(apiUrl, oauthCachePath, oauthCallbackPort);
-    const config = configurationSchema.parse({
-      apiUrl, rpcUrl, agent: await loadOrProvisionAgent(), signerProgram, previewCachePath, oauthCachePath, oauthCallbackPort,
-    });
-    const session: Session = {
-      accessToken,
-      config,
-      http: new PayingHttpClient({
-        signer: {
-          address: clientAddressSchema.parse(config.agent),
-          signTypedData: (request) => signTypedData(config, request),
-        },
-      }),
-    };
-    await ensureAgentBinding(session);
-    return session;
-  })();
-  return sessionPromise;
+const bindSession = async (accessToken: string): Promise<Session> => {
+  const config = configurationSchema.parse({
+    apiUrl, rpcUrl, agent: await loadOrProvisionAgent(), signerProgram, previewCachePath, oauthCachePath, oauthCallbackPort,
+  });
+  const session: Session = {
+    accessToken,
+    config,
+    http: new PayingHttpClient({
+      timeoutMs: 120_000,
+      signer: {
+        address: clientAddressSchema.parse(config.agent),
+        signTypedData: (request) => signTypedData(config, request),
+      },
+    }),
+  };
+  await ensureAgentBinding(session);
+  return session;
+};
+
+const ensureSession = async (): Promise<Session> => {
+  const accessToken = await oauthAccessToken(apiUrl, oauthCachePath, oauthCallbackPort);
+  sessionPromise ??= bindSession(accessToken);
+  try {
+    const session = await sessionPromise;
+    return { ...session, accessToken };
+  } catch (error) {
+    sessionPromise = undefined;
+    throw error;
+  }
 };
 
 const loadCache = async (session: Session): Promise<Record<string, Readonly<Record<string, unknown>>>> => {
@@ -245,7 +274,8 @@ const postTrade = async (session: Session, arguments_: unknown) => {
     const validationResult = await parseHttpJson(validation);
     const error = z.object({ type: z.string() }).loose().safeParse(validationResult.body);
     if (!error.success || error.data.type !== "urn:aqua:error:delegation-required") throw new Error(`Aqua API 409: ${jsonString(validationResult.body)}`);
-    await ensureDelegation(session, preview); validation = await api(session, "/v1/trades", { method: "POST", headers, body });
+    const transactionHash = await ensureDelegation(session, preview);
+    return output(awaitingDelegation(previewId, previewHash, transactionHash));
   }
   if (validation.status !== 402) {
     const submitted = z.record(z.string(), z.unknown()).parse(await json(validation));
@@ -281,12 +311,12 @@ const schema = (value: z.ZodType): Record<string, unknown> => {
 };
 const tools = [
   { name: "request_trade", description: "Resolve, quote, fully describe, and simulate an immutable trade before signing. Map natural language onto policy.kind: a market buy/sell is market; a priced resting or crossing order is limit; a stop loss is stopMarket or stopLimit; a take profit is takeProfitMarket or takeProfitLimit; linked exits are oco or bracket; a trailing stop is trailingStop. timeInForce carries ioc or fok for marketable orders and gtc or gtd for resting ones.", inputSchema: schema(tradePreviewRequestSchema) },
-  { name: "post_trade", description: "Sign the reviewed lifecycle plan locally, satisfy its exact x402 Permit2 funding request, and submit it.", inputSchema: schema(z.object({ previewId: z.uuid(), previewHash: hashSchema }).strict()) },
+  { name: "post_trade", description: "Sign the reviewed lifecycle plan locally, satisfy its exact x402 Permit2 funding request, and submit it. A first call may return status awaiting_delegation after Ledger signing; call post_trade again with the same previewId and previewHash to fund and broadcast. Do not wait for Sepolia receipts in the Ledger step.", inputSchema: schema(z.object({ previewId: z.uuid(), previewHash: hashSchema }).strict()) },
   { name: "get_trades", description: "Read own, subscribed, or combined trade records with stable filtering and sorting.", inputSchema: schema(tradesListQuerySchema) },
   { name: "cancel_trade", description: "Cancel a resting limit order or unwind an armed conditional order, returning vault funds to the Ledger owner.", inputSchema: schema(z.object({ tradeId: z.uuid() }).strict()) },
   { name: "subscribe_to_user", description: "Subscribe to confirmed trades for an EVM address.", inputSchema: schema(z.object({ address: addressSchema }).strict()) },
   { name: "unsubscribe_from_user", description: "Stop collecting trades for an address without deleting its stored records.", inputSchema: schema(z.object({ address: addressSchema }).strict()) },
-  { name: "wipe_subscribed_trades", description: "Delete stored subscribed-wallet trades for one address or all addresses; subscriptions remain active.", inputSchema: schema(subscribedTradesWipeSchema) },
+  { name: "wipe_subscribed_trades", description: "Delete stored subscribed-wallet trades for one address or all addresses; subscriptions remain active. For one address set scope=address and address. For all set scope=all and confirmation=WIPE_ALL_SUBSCRIBED_TRADES.", inputSchema: schema(subscribedTradesWipeToolSchema) },
 ] as const;
 const server = new Server({ name: "aqua-ledger-key-ring", version: "1.0.0" }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, () => Promise.resolve({ tools }));

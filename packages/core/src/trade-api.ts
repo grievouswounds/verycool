@@ -92,6 +92,13 @@ export const subscribedTradesWipeSchema = z.discriminatedUnion("scope", [
   z.object({ scope: z.literal("all"), confirmation: z.literal("WIPE_ALL_SUBSCRIBED_TRADES") }).strict(),
 ]);
 
+/** Object-shaped MCP tool input. OpenAI/Jam reject top-level oneOf on input_schema. */
+export const subscribedTradesWipeToolSchema = z.object({
+  scope: z.enum(["address", "all"]),
+  address: addressSchema.optional(),
+  confirmation: z.literal("WIPE_ALL_SUBSCRIBED_TRADES").optional(),
+}).strict();
+
 export type TokenReference = z.infer<typeof tokenReferenceSchema>;
 export type TradePolicy = z.infer<typeof tradePolicySchema>;
 export type TradePreviewRequest = z.infer<typeof tradePreviewRequestSchema>;

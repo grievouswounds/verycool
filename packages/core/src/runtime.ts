@@ -105,7 +105,10 @@ export const loadRuntimeManifest = async (arguments_: readonly string[]): Promis
   const path = index < 0 ? undefined : arguments_[index + 1];
   if (path !== undefined && path.length > 0) return parseRuntimeManifest(await Bun.file(path).text());
   const encoded = Bun.env["AQUA_RUNTIME_MANIFEST"]?.trim();
-  if (encoded !== undefined && encoded.length > 0) return parseRuntimeManifest(encoded);
+  if (encoded !== undefined && encoded.length > 0) {
+    if (encoded.startsWith("{")) return parseRuntimeManifest(encoded);
+    return parseRuntimeManifest(await Bun.file(encoded).text());
+  }
   throw new Error("Usage: --config <runtime-manifest.json> or set AQUA_RUNTIME_MANIFEST");
 };
 

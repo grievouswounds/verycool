@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { tradingRequestSchema } from "../src/index.ts";
+import { z } from "zod";
+import { subscribedTradesWipeToolSchema, tradingRequestSchema } from "../src/index.ts";
 
 const pair = {
   baseToken: "0x1111111111111111111111111111111111111111",
@@ -115,5 +116,15 @@ describe("agent-first trading input language", () => {
     expect(tradingRequestSchema.safeParse({ action: "prepareSwap", swap: {
       encodedOrder: "0x00", tokenIn: pair.baseToken, tokenOut: pair.quoteToken, amountIn: "1", amountOut: "2",
     } }).success).toBeFalse();
+  });
+});
+
+describe("MCP Jam tool input schemas", () => {
+  test("wipe_subscribed_trades has no top-level oneOf, anyOf, or allOf", () => {
+    const json = z.toJSONSchema(subscribedTradesWipeToolSchema, { target: "draft-2020-12", io: "input" });
+    expect(json).toMatchObject({ type: "object" });
+    expect("oneOf" in json).toBe(false);
+    expect("anyOf" in json).toBe(false);
+    expect("allOf" in json).toBe(false);
   });
 });

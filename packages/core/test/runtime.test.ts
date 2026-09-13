@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { loadRuntimeManifest, parseRuntimeManifest, runtimeManifestHash, runtimeManifestSchema } from "../src/runtime.ts";
 
 const address = (digit: string) => `0x${digit.repeat(40)}`;
@@ -35,6 +37,21 @@ describe("runtime manifest", () => {
     try {
       expect(await loadRuntimeManifest([])).toEqual(withHash);
     } finally {
+      if (previous === undefined) delete Bun.env["AQUA_RUNTIME_MANIFEST"];
+      else Bun.env["AQUA_RUNTIME_MANIFEST"] = previous;
+    }
+  });
+
+  test("loads the manifest from an AQUA_RUNTIME_MANIFEST file path", async () => {
+    const withHash = { ...manifest, manifestHash: runtimeManifestHash(manifest) };
+    const path = `${tmpdir()}/aqua-runtime-manifest-${crypto.randomUUID()}.json`;
+    await Bun.write(path, JSON.stringify(withHash));
+    const previous = Bun.env["AQUA_RUNTIME_MANIFEST"];
+    Bun.env["AQUA_RUNTIME_MANIFEST"] = path;
+    try {
+      expect(await loadRuntimeManifest([])).toEqual(withHash);
+    } finally {
+      await unlink(path);
       if (previous === undefined) delete Bun.env["AQUA_RUNTIME_MANIFEST"];
       else Bun.env["AQUA_RUNTIME_MANIFEST"] = previous;
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { addressSchema, hashSchema, hexSchema, localProfileDefaults, parseRuntimeManifest } from "@aqua/core";
+import { addressSchema, hashSchema, hexSchema, loadRuntimeManifest, localProfileDefaults } from "@aqua/core";
 import type { Address, Hex } from "@aqua/core";
 import { CubaneTransactionSigner, createPooledRpcClient, encodeMint, quantityToHex } from "@aqua/evm";
 import { z } from "zod";
@@ -62,7 +62,7 @@ const provisioned = z.object({ owner: addressSchema, agent: addressSchema }).loo
     method: "POST", headers: { authorization: `Bearer ${hardware.accessToken}` },
   }), "provision"));
 console.error(`Provisioned hosted agent ${provisioned.agent}. Open the Ethereum app for fixture-token delegations.`);
-const manifest = parseRuntimeManifest(Bun.env["AQUA_RUNTIME_MANIFEST"] ?? fail("AQUA_RUNTIME_MANIFEST is required so fixture tokens can be delegated"));
+const manifest = await loadRuntimeManifest(Bun.argv);
 const expiresAt = new Date(Date.now() + 7 * 86_400_000).toISOString();
 for (const token of manifest.fixtures.tokens) {
   const preview = z.object({ previewId: z.uuid(), previewHash: hexSchema, typedData: z.record(z.string(), z.unknown()) }).loose()

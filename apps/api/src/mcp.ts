@@ -2,7 +2,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { AppError, addressSchema, hashSchema, hexSchema, parseBoundedJsonRequest, quantitySchema, subscribedTradesWipeSchema, tradePreviewRequestSchema, tradesListQuerySchema } from "@aqua/core";
+import { AppError, addressSchema, hashSchema, hexSchema, parseBoundedJsonRequest, quantitySchema, subscribedTradesWipeSchema, subscribedTradesWipeToolSchema, tradePreviewRequestSchema, tradesListQuerySchema } from "@aqua/core";
 import type { Address, AuthenticatedPrincipal, Hash, Hex, RpcPort } from "@aqua/core";
 import type { AgentVault, AuthService } from "@aqua/adapters";
 import type { ActivityService } from "@aqua/activity";
@@ -55,7 +55,7 @@ const tools = [
   { name: "cancel_trade", description: "Cancel a resting limit order or unwind an armed conditional order using the hosted agent key.", inputSchema: schema(z.object({ tradeId: z.uuid() }).strict()) },
   { name: "subscribe_to_user", description: "Subscribe to confirmed trades for an EVM address.", inputSchema: schema(z.object({ address: addressSchema }).strict()) },
   { name: "unsubscribe_from_user", description: "Stop collecting trades for an address without deleting its stored records.", inputSchema: schema(z.object({ address: addressSchema }).strict()) },
-  { name: "wipe_subscribed_trades", description: "Delete stored subscribed-wallet trades for one address or all addresses; subscriptions remain active.", inputSchema: schema(subscribedTradesWipeSchema) },
+  { name: "wipe_subscribed_trades", description: "Delete stored subscribed-wallet trades for one address or all addresses; subscriptions remain active. For one address set scope=address and address. For all set scope=all and confirmation=WIPE_ALL_SUBSCRIBED_TRADES.", inputSchema: schema(subscribedTradesWipeToolSchema) },
 ] as const;
 
 const setupHint = (owner: Address, origin: string, type: string): string => {
