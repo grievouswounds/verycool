@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { PostgresKeeperJobRepository, PostgresTradingRepository, PostgresTradeTriggerRepository, createDatabase, closeDatabase } from "@aqua/adapters";
+import { AquaProtocolGateway, PostgresKeeperJobRepository, PostgresTradingRepository, PostgresTradeTriggerRepository, createDatabase, closeDatabase } from "@aqua/adapters";
+import { ProtocolService } from "@aqua/contracts";
 import { hexSchema, loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
-import { createPooledRpcClient, initializeCubane } from "@aqua/evm";
+import { bufferedGasLimit, createPooledRpcClient, hexToQuantity, initializeCubane } from "@aqua/evm";
 import type { Eip1559Transaction } from "@aqua/evm";
-import { Keeper, OrderBookIndexer, TriggerEvaluator } from "@aqua/orderbook";
+import { IntentAuthorizationService, Keeper, OrderBookIndexer, TriggerEvaluator, TradingService } from "@aqua/orderbook";
+import { currencySchema, QuoterService } from "@aqua/quoter";
 import { createSecretBroker } from "@aqua/security";
+import { TradeApiService } from "@aqua/trade-api";
 
 const manifest=await loadRuntimeManifest(Bun.argv);const defaults=localProfileDefaults;
 const readyIndex=Bun.argv.indexOf("--ready-out");const readyOut=readyIndex<0?null:Bun.argv[readyIndex+1]??null;
@@ -18,7 +21,18 @@ const keeperRepository=new PostgresKeeperJobRepository(database);await keeperRep
 const signer={address:identity.keeper,sign:(transaction:Eip1559Transaction)=>broker.signEip1559(transaction)};
 const keeper=new Keeper(keeperRepository,rpc,signer,{chainId:manifest.chain.id,allowedTargets:manifest.keeper.allowedTargets,allowedSelectors:manifest.keeper.allowedSelectors.map((selector)=>hexSchema.parse(selector)),gasLimit:defaults.keeperGasLimitCeiling,maxFeePerGas:defaults.keeperMaxFeePerGasCeiling,replacementSeconds:defaults.keeperReplacementSeconds,leaseSeconds:defaults.keeperLeaseSeconds});
 const triggers=new TriggerEvaluator(repository,keeperRepository,{controller:manifest.contracts.intentController.address,matcher:manifest.contracts.boundedMatcher.address,factory:manifest.contracts.orderVaultFactory.address,minimumBlocks:BigInt(defaults.triggerMinimumBlocks),minimumSeconds:BigInt(defaults.triggerMinimumSeconds)},new PostgresTradeTriggerRepository(database));
+const protocol=new ProtocolService({chainId:manifest.chain.id,aqua:manifest.contracts.aqua.address,aquaSwapRouter:manifest.contracts.aquaSwapRouter.address,limitSwapRouter:manifest.contracts.limitSwapRouter.address,wrappedNativeToken:manifest.contracts.wrappedNativeToken.address},rpc);
+const trading=new TradingService(repository,new AquaProtocolGateway(protocol,rpc),new IntentAuthorizationService(repository,rpc,{chainId:manifest.chain.id,controller:manifest.contracts.intentController.address,validitySeconds:defaults.intentAuthorizationTtlSeconds}),manifest.chain.id);
+const quoter=new QuoterService({chainId:manifest.chain.id,defaultCurrency:currencySchema.parse("USD"),priceClient:null});
+const tradeApi=new TradeApiService(database,rpc,trading,quoter,manifest,{relay:async(call)=>{
+  const from=identity.keeper;const value=call.value===undefined?0n:hexToQuantity(call.value);
+  const session=rpc.session();
+  const [nonce,estimated,gasPrice,priority]=await Promise.all([session.transactionCount(from),session.estimateGas({...call,from}),session.gasPrice(),session.maxPriorityFeePerGas()]);
+  const gas=bufferedGasLimit(estimated);
+  const raw=await broker.signEip1559({chainId:BigInt(manifest.chain.id),nonce,maxPriorityFeePerGas:priority,maxFeePerGas:gasPrice*2n+priority,gas,to:call.to,value,data:call.data});
+  return session.sendRawTransaction(raw);
+}});
 console.log(JSON.stringify({level:"info",component:"order-worker",manifestHash:runtimeManifestHash(manifest)}));
-const workerId=randomUUID();const runCycle=async():Promise<void>=>{await indexer.runOnce();const head=await rpc.blockNumber();if(head>=BigInt(manifest.indexer.confirmations)){const confirmed=await rpc.block(head-BigInt(manifest.indexer.confirmations));await triggers.runOnce(confirmed.number,confirmed.timestamp);}await keeper.runOnce(workerId);};
+const workerId=randomUUID();const runCycle=async():Promise<void>=>{await tradeApi.retryFundedActivations();await indexer.runOnce();const head=await rpc.blockNumber();if(head>=BigInt(manifest.indexer.confirmations)){const confirmed=await rpc.block(head-BigInt(manifest.indexer.confirmations));await triggers.runOnce(confirmed.number,confirmed.timestamp);}await keeper.runOnce(workerId);};
 let stopped=false;let timer:ReturnType<typeof setTimeout>|undefined;const schedule=():void=>{if(stopped)return;timer=setTimeout(()=>{void runCycle().catch((error:unknown)=>{console.error(JSON.stringify({level:"error",component:"order-worker",message:error instanceof Error?error.message:"Unknown worker error"}));}).finally(schedule);},defaults.orderbookPollIntervalSeconds*1_000);};
 await runCycle();if(readyOut!==null)await Bun.write(readyOut,"ready\n");schedule();const shutdown=async():Promise<void>=>{stopped=true;if(timer!==undefined)clearTimeout(timer);if(readyOut!==null)await rm(readyOut,{force:true});await closeDatabase(database);};process.once("SIGTERM",()=>{void shutdown();});process.once("SIGINT",()=>{void shutdown();});

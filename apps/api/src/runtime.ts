@@ -4,7 +4,7 @@ import { ActivityService, RpcActivityChain } from "@aqua/activity";
 import { loadRuntimeManifest, localProfileDefaults, runtimeManifestHash } from "@aqua/core";
 import type { RuntimeManifest } from "@aqua/core";
 import { ProtocolService } from "@aqua/contracts";
-import { initializeCubane, createPooledRpcClient, hexToBytes, hexToQuantity, keccakHex } from "@aqua/evm";
+import { initializeCubane, bufferedGasLimit, createPooledRpcClient, hexToBytes, hexToQuantity, keccakHex } from "@aqua/evm";
 import { IntentAuthorizationService, TradingService } from "@aqua/orderbook";
 import { createSecretBroker } from "@aqua/security";
 import type { SecretBroker } from "@aqua/security";
@@ -66,7 +66,8 @@ export const createApiRuntime = async (argv: readonly string[] = Bun.argv): Prom
   const tradeApi = new TradeApiService(database, rpc, trading, quoter, manifest, { relay: async (call) => {
     const from = identity.keeper; const value = call.value === undefined ? 0n : hexToQuantity(call.value);
     const session = rpc.session();
-    const [nonce, gas, gasPrice, priority] = await Promise.all([session.transactionCount(from), session.estimateGas({ ...call, from }), session.gasPrice(), session.maxPriorityFeePerGas()]);
+    const [nonce, estimated, gasPrice, priority] = await Promise.all([session.transactionCount(from), session.estimateGas({ ...call, from }), session.gasPrice(), session.maxPriorityFeePerGas()]);
+    const gas = bufferedGasLimit(estimated);
     const raw = await broker.signEip1559({ chainId: BigInt(manifest.chain.id), nonce, maxPriorityFeePerGas: priority, maxFeePerGas: gasPrice * 2n + priority, gas, to: call.to, value, data: call.data });
     return session.sendRawTransaction(raw);
   } });

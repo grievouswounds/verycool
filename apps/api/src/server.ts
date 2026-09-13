@@ -167,7 +167,7 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
     "/mcp": {
       POST: (request) => execute(request, async () => {
         if (dependencies.agentVault === null) throw new AppError(503, "urn:aqua:error:agent-kek", "AQUA_AGENT_KEK is not configured");
-        return handleHostedMcp(request, { origin: dependencies.issuer, auth: dependencies.auth, tradeApi: dependencies.tradeApi, activity: dependencies.activity, agentVault: dependencies.agentVault, rpc: dependencies.rpc });
+        return handleHostedMcp(request, { origin: dependencies.issuer, auth: dependencies.auth, tradeApi: dependencies.tradeApi, activity: dependencies.activity, agentVault: dependencies.agentVault, rpc: dependencies.rpc, permit2: dependencies.manifest.contracts.permit2.address, manifest: dependencies.manifest });
       }, dependencies.corsOrigin),
     },
     "/authorize": new Response(authorizePageHtml,{headers:authorizePageHeaders}),

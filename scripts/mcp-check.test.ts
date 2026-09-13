@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertHardwareAmrPath,
+  MCP_CHECK_OAUTH_REUSE_ENV,
   missingRequiredAquaTools,
   oauthCacheIsFresh,
   parseMcpCheckMode,
@@ -20,7 +21,7 @@ describe("mcp-check helpers", () => {
   test("matches required tools by canonical snake_case names", () => {
     expect(missingRequiredAquaTools([
       "request_trade", "post_trade", "get_trades", "cancel_trade",
-      "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades",
+      "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades", "get_balances",
     ])).toEqual([]);
     expect(missingRequiredAquaTools(["request_trade"])).toContain("cancel_trade");
   });
@@ -35,6 +36,10 @@ describe("mcp-check helpers", () => {
     }));
     expect(await oauthCacheIsFresh(join(dir, "oauth.json"))).toBe(true);
     expect(await oauthCacheIsFresh(join(dir, "oauth.json"), Date.now() + 200_000)).toBe(false);
+  });
+
+  test("stdio bridge checks reuse a warm oauth.json instead of Knock", () => {
+    expect(MCP_CHECK_OAUTH_REUSE_ENV).toEqual(["-e", "AQUA_OAUTH_REUSE_CACHE=1"]);
   });
 
   test("refuses the SIWE access-token override", () => {

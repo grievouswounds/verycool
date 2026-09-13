@@ -5,6 +5,7 @@ import { parseStrictJson } from "@aqua/core";
 import { z } from "zod";
 
 export const MCP_CHECK_MODES = ["bridge", "hosted", "all"] as const;
+export const MCP_CHECK_OAUTH_REUSE_ENV = ["-e", "AQUA_OAUTH_REUSE_CACHE=1"] as const;
 export type McpCheckMode = (typeof MCP_CHECK_MODES)[number];
 
 const doctorSchema = z.object({
@@ -46,10 +47,7 @@ export const parseMcpCheckMode = (value: string): McpCheckMode => {
 };
 
 export const missingRequiredAquaTools = (names: readonly string[]): readonly AquaMcpToolName[] => {
-  const locals: readonly AquaMcpToolName[] = [
-    "request_trade", "post_trade", "get_trades", "cancel_trade",
-    "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades",
-  ];
+  const locals = Object.keys(requiredAquaTools) as AquaMcpToolName[];
   return locals.filter((local) => !names.includes(requiredAquaTools[local]));
 };
 
@@ -123,6 +121,7 @@ const checkBridge = async (mcpjam: string, bun: string, root: string, ledger: Le
     "-e", `XDG_STATE_HOME=${stateHome}`,
     "-e", `AQUA_LEDGER=${ledger}`,
     "-e", `AQUA_LEDGER_TRANSPORT=${Bun.env["AQUA_LEDGER_TRANSPORT"] ?? (ledger === "emulator" ? "speculos" : "node-hid")}`,
+    ...MCP_CHECK_OAUTH_REUSE_ENV,
   ];
   if (ledger === "emulator") {
     envFlags.push("-e", "AQUA_E2E=1");

@@ -11,7 +11,8 @@ export AQUA_RUNTIME_MANIFEST="${AQUA_RUNTIME_MANIFEST:-$root/.data/runtime-manif
 export XDG_STATE_HOME="$root/.data/aqua-mcp-state"
 export AQUA_LEDGER="physical"
 export AQUA_LEDGER_TRANSPORT="node-hid"
-unset AQUA_OAUTH_REUSE_CACHE
+export AQUA_OAUTH_REUSE_CACHE=1
+export AQUA_OAUTH_CALLBACK_PORT="${AQUA_OAUTH_CALLBACK_PORT:-41740}"
 export PATH="$root/node_modules/.bin:${HOME}/.bun/bin:/nix/var/nix/profiles/default/bin:${HOME}/.nix-profile/bin:${PATH}"
 export AQUA_WALLET_CLI="${AQUA_WALLET_CLI:-$root/node_modules/.bin/wallet-cli}"
 pass_file="$root/.data/aqua-mcp-state/wallet-pass"

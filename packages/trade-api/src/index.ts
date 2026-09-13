@@ -3,7 +3,7 @@ import { HTTPFacilitatorClient } from "@x402/core/http";
 import { decodePaymentSignatureHeader } from "@x402/core/http";
 import type { PaymentRequired, SettleResponse } from "@x402/core/types";
 import {
-  addressSchema, AppError, decodeBase64urlJson, hashSchema, hexSchema, parseStrictJson, parseTokenAmount, positiveAmountSchema, quantitySchema,
+  addressSchema, AppError, decodeBase64urlJson, hashSchema, hexSchema, matchFixtureTokens, parseStrictJson, parseTokenAmount, positiveAmountSchema, quantitySchema,
 } from "@aqua/core";
 import type {
   Address, AuthenticatedPrincipal, Hash, Hex, RpcCall, RpcPort, RuntimeManifest, SubscribedTradesWipe,
@@ -21,6 +21,8 @@ import type { TradingService } from "@aqua/orderbook";
 import type { QuoterService, TokenSearchResult } from "@aqua/quoter";
 import { exactPermit2UpfrontRequirement, paymentIdentifier } from "@aqua/x402-adapter";
 import { z } from "zod";
+import { fundingConfirmation } from "./funding-delta.ts";
+import { nextFundedActivation, previewSubmitAllowed } from "./funded-activation.ts";
 import { simulateFundedCalls } from "./safety.ts";
 
 const explainZod = (error: z.ZodError): string =>
@@ -51,12 +53,13 @@ const jsonObject = (value: unknown, label: string): Readonly<Record<string, unkn
 interface AgentBindingRow { readonly agent: Address }
 interface AgentChallengeRow { readonly owner: Address; readonly agent: Address; readonly message: string; readonly expires_at: Date; readonly used_at: Date | null }
 interface PreviewRow { readonly id: string; readonly preview_hash: Hash; readonly owner: Address; readonly agent: Address; readonly state: string; readonly request: TradePreviewRequest; readonly response: Readonly<Record<string, unknown>>; readonly lifecycle_nonce: Hash; readonly expires_at: Date; readonly submitted_at: Date | null }
-interface OperationRow { readonly id: string; readonly state: string; readonly payment_transaction: Hash | null; readonly deployment_transaction: Hash | null; readonly lifecycle_transaction: Hash | null; readonly action_payload: unknown; readonly lifecycle_signature: Hex | null; readonly prerequisite_transactions: unknown }
+interface OperationRow { readonly id: string; readonly state: string; readonly payment_transaction: Hash | null; readonly deployment_transaction: Hash | null; readonly lifecycle_transaction: Hash | null; readonly action_payload: unknown; readonly lifecycle_signature: Hex | null; readonly prerequisite_transactions: unknown; readonly owner: Address; readonly agent: Address; readonly sell_token: Address }
 interface DelegationPreviewRow { readonly id: string; readonly preview_hash: Hash; readonly owner: Address; readonly agent: Address; readonly token: Address; readonly max_per_order: string; readonly max_per_day: string; readonly valid_until: Date; readonly typed_data: Readonly<Record<string, unknown>>; readonly expires_at: Date; readonly used_at: Date | null }
 interface DelegationRow { readonly max_per_order: string; readonly max_per_day: string; readonly spent_today: string; readonly day_number: string; readonly valid_until: Date }
-interface OwnTradeRow { readonly id: string; readonly status: string; readonly owner: Address; readonly agent: Address; readonly sell_token: Address; readonly buy_token: Address; readonly sell_amount: string; readonly funded_amount: string; readonly payment_transaction: Hash | null; readonly lifecycle_transaction: Hash | null; readonly kind: string; readonly occurred_at: Date; readonly updated_at: Date }
+interface OwnTradeRow { readonly id: string; readonly status: string; readonly owner: Address; readonly agent: Address; readonly sell_token: Address; readonly buy_token: Address; readonly sell_amount: string; readonly funded_amount: string; readonly payment_transaction: Hash | null; readonly lifecycle_transaction: Hash | null; readonly activation_error: string | null; readonly kind: string; readonly occurred_at: Date; readonly updated_at: Date }
 interface SubscribedTradeRow { readonly id: string; readonly watched_address: Address; readonly transaction_hash: Hash; readonly sell_token: Address; readonly buy_token: Address; readonly sell_amount: string; readonly buy_amount: string; readonly occurred_at: Date; readonly updated_at: Date }
 export interface TransactionRelay { relay(call: RpcCall): Promise<Hash> }
+export { nextFundedActivation, previewSubmitAllowed } from "./funded-activation.ts";
 
 const canonical = (value: unknown): string => {
   if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
@@ -205,6 +208,9 @@ export class TradeApiService {
 
   private async resolve(reference: TokenReference): Promise<ResolvedToken | readonly TokenSearchResult[]> {
     if (reference.type === "search") {
+      const fixtures = matchFixtureTokens(this.manifest.fixtures.tokens, reference.query);
+      const fixture = fixtures.length === 1 ? fixtures[0] : undefined;
+      if (fixture !== undefined) return this.resolve({ type: "address", address: fixture.address });
       const candidates = await this.quoter.searchTokens(reference.query);
       const exact = candidates.filter((item) => item.address.toLowerCase() === reference.query.toLowerCase() || item.symbol.toLowerCase() === reference.query.toLowerCase() || item.name.toLowerCase() === reference.query.toLowerCase());
       if (exact.length !== 1) return candidates;
@@ -387,11 +393,11 @@ export class TradeApiService {
     const preview = previews[0];
     if (preview?.owner !== principal.address) throw new AppError(404, "urn:aqua:error:preview", "Trade preview was not found");
     if (preview.preview_hash !== input.previewHash) throw new AppError(409, "urn:aqua:error:preview-hash", "Trade preview hash does not match");
-    if (preview.expires_at <= new Date()) throw new AppError(409, "urn:aqua:error:preview-expired", "Trade preview has expired; request a new preview");
     if (preview.state === "unsafe") throw new AppError(409, "urn:aqua:error:preview-unsafe", "Unsafe trade previews cannot be submitted");
-    const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions FROM agent_order_operations WHERE id=${input.previewId}`;
+    const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions,owner,agent,sell_token FROM agent_order_operations WHERE id=${input.previewId}`;
     const existing = operations[0];
     if (existing?.lifecycle_transaction !== null && existing?.lifecycle_transaction !== undefined) return { status: 200, body: this.submissionBody(existing.id, existing.state, existing.lifecycle_transaction, existing.payment_transaction, parseRequired(prerequisiteHashesSchema, existing.prerequisite_transactions, "Prerequisite transactions"), existing.deployment_transaction) };
+    if (!previewSubmitAllowed({ expiresAt: preview.expires_at, now: new Date(), paymentTransaction: existing?.payment_transaction })) throw new AppError(409, "urn:aqua:error:preview-expired", "Trade preview has expired; request a new preview");
     if (existing?.lifecycle_signature !== null && existing?.lifecycle_signature !== undefined && existing.lifecycle_signature !== input.lifecycleSignature) throw new AppError(409, "urn:aqua:error:idempotency", "Idempotent retry changed the lifecycle signature");
     const response = jsonObject(preview.response, "Preview response");
     const lifecycle = parseRequired(typedDataSchema, response["lifecycle"], "Lifecycle typed data");
@@ -424,7 +430,22 @@ export class TradeApiService {
       const reason = verification.invalidReason ?? verification.invalidMessage ?? "x402 payment payer or signature is invalid";
       throw new AppError(402, "urn:aqua:error:x402-verification", `${reason}; payer=${verification.payer ?? "none"} agent=${preview.agent}`);
     }
-    const balanceBefore = decodeUint256(await this.rpc.call({ to: normalized.sellToken, data: encodeBalanceOf(vault) }));
+    const storedPayload = { ...execution, signatures: [input.lifecycleSignature, ...additionalSignatures] };
+    const persistFunded = async (fundingHash: Hash, settlement: SettleResponse | undefined): Promise<TradeSubmissionResult> => {
+      await this.db`INSERT INTO agent_order_operations(id,owner,agent,vault,sell_token,buy_token,sell_amount,funded_amount,state,lifecycle_nonce,payment_identifier,payment_transaction,action_payload,lifecycle_signature,prerequisite_transactions,created_at,updated_at) VALUES(${preview.id},${preview.owner},${preview.agent},${vault},${normalized.sellToken},${normalized.buyToken},${atomicAmount},${atomicAmount},'fundedActivationPending',${execution.action.nonce},${paymentIdentifier(preview.id)},${fundingHash},${JSON.stringify(storedPayload)}::jsonb,${input.lifecycleSignature},${JSON.stringify(prerequisiteTransactions)}::jsonb,now(),now()) ON CONFLICT(id) DO UPDATE SET funded_amount=EXCLUDED.funded_amount,state='fundedActivationPending',payment_transaction=EXCLUDED.payment_transaction,action_payload=EXCLUDED.action_payload,lifecycle_signature=EXCLUDED.lifecycle_signature,prerequisite_transactions=EXCLUDED.prerequisite_transactions,updated_at=now()`;
+      await this.db`UPDATE trade_previews SET state='submitted',submitted_at=now() WHERE id=${preview.id} AND state='ready'`;
+      const stored: OperationRow = { id: preview.id, state: "fundedActivationPending", payment_transaction: fundingHash, deployment_transaction: null, lifecycle_transaction: null, action_payload: storedPayload, lifecycle_signature: input.lifecycleSignature, prerequisite_transactions: prerequisiteTransactions, owner: preview.owner, agent: preview.agent, sell_token: normalized.sellToken };
+      const activated = await this.activateFunded(stored, preview.owner, preview.agent, normalized.sellToken, input.lifecycleSignature);
+      return settlement === undefined ? activated : { ...activated, paymentResponse: settlement };
+    };
+    const priorSettlements = await this.db<{ transaction_hash: Hash | null }[]>`SELECT transaction_hash FROM x402_settlements WHERE preview_id=${preview.id}`;
+    const priorHash = priorSettlements[0]?.transaction_hash ?? null;
+    const vaultBalance = decodeUint256(await this.rpc.call({ to: normalized.sellToken, data: encodeBalanceOf(vault) }));
+    if (priorHash !== null && vaultBalance >= BigInt(atomicAmount)) {
+      await this.recordSettlement(preview.id, preview.agent, payload, "settled", priorHash, null);
+      return persistFunded(priorHash, undefined);
+    }
+    const balanceBefore = vaultBalance;
     await this.recordSettlement(preview.id, preview.agent, payload, "settling", null, null);
     let settlement: SettleResponse;
     try { settlement = await this.facilitator.settle(payload, accepted); }
@@ -434,18 +455,47 @@ export class TradeApiService {
     }
     if (!settlement.success) throw new AppError(402, "urn:aqua:error:x402-settlement", settlement.errorMessage ?? settlement.errorReason ?? "x402 settlement failed");
     const fundingHash = hashSchema.parse(settlement.transaction);
-    const balanceAfter = decodeUint256(await this.rpc.call({ to: normalized.sellToken, data: encodeBalanceOf(vault) }));
-    if (balanceAfter - balanceBefore !== BigInt(atomicAmount)) {
+    const confirmation = await this.observeVaultFunding(normalized.sellToken, vault, BigInt(atomicAmount), fundingHash, balanceBefore);
+    if (confirmation === "pending") {
+      await this.recordSettlement(preview.id, preview.agent, payload, "pending", fundingHash, "funding receipt or vault delta not yet observed");
+      return { status: 202, body: { tradeId: preview.id, operationId: paymentIdentifier(preview.id), status: "fundedActivationPending", tradeTransactionHash: null, fundingTransactionHash: fundingHash, prerequisiteTransactionHashes: prerequisiteTransactions } };
+    }
+    if (confirmation === "mismatch") {
       await this.recordSettlement(preview.id, preview.agent, payload, "failed", fundingHash, "settlement balance delta was not exact");
       throw new AppError(409, "urn:aqua:error:token-balance-delta", "Funded token changed the vault balance by a non-exact amount; activation is blocked and the Ledger owner can recover deployed-vault funds");
     }
     await this.recordSettlement(preview.id, preview.agent, payload, "settled", fundingHash, null);
-    const storedPayload = { ...execution, signatures: [input.lifecycleSignature, ...additionalSignatures] };
-    await this.db`INSERT INTO agent_order_operations(id,owner,agent,vault,sell_token,buy_token,sell_amount,funded_amount,state,lifecycle_nonce,payment_identifier,payment_transaction,action_payload,lifecycle_signature,prerequisite_transactions,created_at,updated_at) VALUES(${preview.id},${preview.owner},${preview.agent},${vault},${normalized.sellToken},${normalized.buyToken},${atomicAmount},${atomicAmount},'fundedActivationPending',${execution.action.nonce},${paymentIdentifier(preview.id)},${fundingHash},${JSON.stringify(storedPayload)}::jsonb,${input.lifecycleSignature},${JSON.stringify(prerequisiteTransactions)}::jsonb,now(),now()) ON CONFLICT(id) DO UPDATE SET funded_amount=EXCLUDED.funded_amount,state='fundedActivationPending',payment_transaction=EXCLUDED.payment_transaction,action_payload=EXCLUDED.action_payload,lifecycle_signature=EXCLUDED.lifecycle_signature,prerequisite_transactions=EXCLUDED.prerequisite_transactions,updated_at=now()`;
-    await this.db`UPDATE trade_previews SET state='submitted',submitted_at=now() WHERE id=${preview.id} AND state='ready'`;
-    const stored: OperationRow = { id: preview.id, state: "fundedActivationPending", payment_transaction: fundingHash, deployment_transaction: null, lifecycle_transaction: null, action_payload: storedPayload, lifecycle_signature: input.lifecycleSignature, prerequisite_transactions: prerequisiteTransactions };
-    const activated = await this.activateFunded(stored, preview.owner, preview.agent, normalized.sellToken, input.lifecycleSignature);
-    return { ...activated, paymentResponse: settlement };
+    return persistFunded(fundingHash, settlement);
+  }
+
+  private async observeVaultFunding(sellToken: Address, vault: Address, expected: bigint, fundingHash: Hash, balanceBefore: bigint): Promise<"exact" | "pending" | "mismatch"> {
+    const deadline = Date.now() + 12_000;
+    while (Date.now() < deadline) {
+      const receipt = await this.rpc.transactionReceipt(fundingHash);
+      const after = decodeUint256(await this.rpc.call({ to: sellToken, data: encodeBalanceOf(vault) }));
+      const receiptKind = receipt === null ? "missing" as const : receipt.status;
+      const state = fundingConfirmation({ receipt: receiptKind, delta: after - balanceBefore, expected });
+      if (state === "exact") return "exact";
+      if (state === "mismatch") return "mismatch";
+      await Bun.sleep(500);
+    }
+    const receipt = await this.rpc.transactionReceipt(fundingHash);
+    const after = decodeUint256(await this.rpc.call({ to: sellToken, data: encodeBalanceOf(vault) }));
+    const receiptKind = receipt === null ? "missing" as const : receipt.status;
+    return fundingConfirmation({ receipt: receiptKind, delta: after - balanceBefore, expected, terminal: true });
+  }
+
+  public async retryFundedActivations(): Promise<void> {
+    const rows = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions,owner,agent,sell_token FROM agent_order_operations WHERE state='fundedActivationPending' AND payment_transaction IS NOT NULL AND lifecycle_transaction IS NULL LIMIT 20`;
+    for (const row of rows) {
+      const signature = row.lifecycle_signature;
+      if (signature === null) continue;
+      await this.activateFunded(row, row.owner, row.agent, row.sell_token, signature);
+    }
+  }
+
+  private pendingActivation(operation: OperationRow, prerequisiteTransactions: readonly Hash[], deploymentHash: Hash | null, activationError: string): TradeSubmissionResult {
+    return { status: 202, body: { ...this.submissionBody(operation.id, "fundedActivationPending", null, operation.payment_transaction, prerequisiteTransactions, deploymentHash), operationId: paymentIdentifier(operation.id), activationError } };
   }
 
   private async activateFunded(operation: OperationRow, owner: Address, agent: Address, sellToken: Address, signature: Hex): Promise<TradeSubmissionResult> {
@@ -453,12 +503,19 @@ export class TradeApiService {
     const prerequisiteTransactions = parseRequired(prerequisiteHashesSchema, operation.prerequisite_transactions, "Prerequisite transactions");
     let deploymentHash = operation.deployment_transaction;
     try {
-      if (await this.rpc.getCode(execution.vault) === "0x") {
+      const vaultCode = await this.rpc.getCode(execution.vault);
+      const deployReceipt = deploymentHash === null ? null : await this.rpc.transactionReceipt(deploymentHash);
+      const deploymentReceipt = deployReceipt === null ? (deploymentHash === null ? null : "missing" as const) : deployReceipt.status;
+      const decision = nextFundedActivation({ vaultCode, deploymentTransaction: deploymentHash, deploymentReceipt });
+      if (decision.action === "deploy") {
         deploymentHash = await this.relay.relay({ to: this.manifest.contracts.orderVaultFactory.address, data: encodeDeployVault(execution.deployment) });
-        await this.db`UPDATE agent_order_operations SET deployment_transaction=${deploymentHash},updated_at=now() WHERE id=${operation.id}`;
-        const receipt = await this.waitForReceipt(deploymentHash, 30_000);
-        if (receipt === null) return { status: 202, body: this.submissionBody(operation.id, "fundedActivationPending", null, operation.payment_transaction, prerequisiteTransactions, deploymentHash) };
-        if (receipt.status !== "success") throw new Error("Vault deployment reverted");
+        const activationError = "vault deployment submitted; call post_trade again with the same ids";
+        await this.db`UPDATE agent_order_operations SET deployment_transaction=${deploymentHash},state='fundedActivationPending',activation_error=${activationError},updated_at=now() WHERE id=${operation.id}`;
+        return this.pendingActivation(operation, prerequisiteTransactions, deploymentHash, activationError);
+      }
+      if (decision.action === "waitDeploy") {
+        await this.db`UPDATE agent_order_operations SET state='fundedActivationPending',activation_error=${decision.activationError},updated_at=now() WHERE id=${operation.id}`;
+        return this.pendingActivation(operation, prerequisiteTransactions, deploymentHash, decision.activationError);
       }
       const balance = decodeUint256(await this.rpc.call({ to: sellToken, data: encodeBalanceOf(execution.vault) }));
       if (balance < BigInt(execution.fundingAmountUnits)) throw new Error("Vault funding is below the reviewed amount");
@@ -473,7 +530,7 @@ export class TradeApiService {
           await this.db`INSERT INTO trade_triggers(id,trade_id,owner,agent,vault,sell_token,buy_token,kind,role,trigger_price,trail,activation_price,high_water,size,group_nonce,intent_hash,action_payload,signature,status,created_at,updated_at) VALUES(${crypto.randomUUID()},${operation.id},${owner},${agent},${execution.vault},${execution.deployment.sellToken},${execution.action.tokens[0] ?? sellToken},${execution.kind},${leg.role},${leg.triggerPrice},${leg.trail === null ? null : JSON.stringify(leg.trail)}::jsonb,${leg.activationPrice},NULL,${JSON.stringify(size)}::jsonb,${group},${intentHash},${JSON.stringify(leg.action)}::jsonb,${legSignature},'armed',now(),now())`;
         }
         await this.db.begin(async (transaction) => {
-          await transaction`UPDATE agent_order_operations SET state='armed',updated_at=now() WHERE id=${operation.id}`;
+          await transaction`UPDATE agent_order_operations SET state='armed',activation_error=NULL,updated_at=now() WHERE id=${operation.id}`;
           await transaction`UPDATE delegation_projections SET spent_today=CASE WHEN day_number=${String(Math.floor(Date.now()/86_400_000))} THEN spent_today+${execution.fundingAmountUnits} ELSE ${execution.fundingAmountUnits} END,day_number=${String(Math.floor(Date.now()/86_400_000))},updated_at=now() WHERE owner=${owner} AND agent=${agent} AND token=${sellToken}`;
         });
         return { status: 200, body: this.submissionBody(operation.id, "armed", null, operation.payment_transaction, prerequisiteTransactions, deploymentHash) };
@@ -483,22 +540,16 @@ export class TradeApiService {
       await Promise.all([this.rpc.call(call), this.rpc.estimateGas(call)]);
       const tradeHash = await this.relay.relay(call);
       await this.db.begin(async (transaction) => {
-        await transaction`UPDATE agent_order_operations SET state='broadcast',lifecycle_transaction=${tradeHash},updated_at=now() WHERE id=${operation.id} AND lifecycle_transaction IS NULL`;
+        await transaction`UPDATE agent_order_operations SET state='broadcast',lifecycle_transaction=${tradeHash},activation_error=NULL,updated_at=now() WHERE id=${operation.id} AND lifecycle_transaction IS NULL`;
         await transaction`UPDATE delegation_projections SET spent_today=CASE WHEN day_number=${String(Math.floor(Date.now()/86_400_000))} THEN spent_today+${execution.fundingAmountUnits} ELSE ${execution.fundingAmountUnits} END,day_number=${String(Math.floor(Date.now()/86_400_000))},updated_at=now() WHERE owner=${owner} AND agent=${agent} AND token=${sellToken}`;
       });
       return { status: 200, body: this.submissionBody(operation.id, "broadcast", tradeHash, operation.payment_transaction, prerequisiteTransactions, deploymentHash) };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "activation interrupted";
       console.error(JSON.stringify({ level: "error", component: "trade-api", message: "vault activation failed", tradeId: operation.id, detail: message }));
-      await this.db`UPDATE agent_order_operations SET state='fundedActivationPending',updated_at=now() WHERE id=${operation.id}`;
-      return { status: 202, body: { ...this.submissionBody(operation.id, "fundedActivationPending", null, operation.payment_transaction, prerequisiteTransactions, deploymentHash), operationId: paymentIdentifier(operation.id), activationError: message } };
+      await this.db`UPDATE agent_order_operations SET state='fundedActivationPending',activation_error=${message},updated_at=now() WHERE id=${operation.id}`;
+      return this.pendingActivation(operation, prerequisiteTransactions, deploymentHash, message);
     }
-  }
-
-  private async waitForReceipt(hash: Hash, timeoutMs: number): Promise<Awaited<ReturnType<RpcPort["transactionReceipt"]>>> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) { const receipt = await this.rpc.transactionReceipt(hash); if (receipt !== null) return receipt; await Bun.sleep(250); }
-    return null;
   }
 
   private async recordSettlement(previewId: string, payer: Address, payload: unknown, state: string, transactionHash: Hash | null, error: string | null): Promise<void> {
@@ -516,9 +567,9 @@ export class TradeApiService {
   public async listTrades(query: TradesListQuery, owner: Address) {
     const cursorSchema = z.object({ at: z.iso.datetime({ offset: true }), id: z.string().min(1) }).strict();
     const cursor = query.cursor === undefined ? null : cursorSchema.parse(decodeBase64urlJson(query.cursor));
-    const ownRows = query.source !== "subscriptions" ? await this.db<OwnTradeRow[]>`SELECT o.id,o.state AS status,o.owner,o.agent,o.sell_token,o.buy_token,o.sell_amount::text,o.funded_amount::text,o.payment_transaction,o.lifecycle_transaction,p.request->'policy'->>'kind' AS kind,o.created_at AS occurred_at,o.updated_at FROM agent_order_operations o JOIN trade_previews p ON p.id=o.id WHERE o.owner=${owner} LIMIT 1000` : [];
+    const ownRows = query.source !== "subscriptions" ? await this.db<OwnTradeRow[]>`SELECT o.id,o.state AS status,o.owner,o.agent,o.sell_token,o.buy_token,o.sell_amount::text,o.funded_amount::text,o.payment_transaction,o.lifecycle_transaction,o.activation_error,p.request->'policy'->>'kind' AS kind,o.created_at AS occurred_at,o.updated_at FROM agent_order_operations o JOIN trade_previews p ON p.id=o.id WHERE o.owner=${owner} LIMIT 1000` : [];
     const subscribedRows = query.source !== "own" ? await this.db<SubscribedTradeRow[]>`SELECT id,watched_address,transaction_hash,sell_token,buy_token,sell_amount::text,buy_amount::text,occurred_at,updated_at FROM subscribed_trades WHERE owner=${owner} LIMIT 1000` : [];
-    const own = ownRows.map((row) => ({ recordType: "aqua" as const, id: row.id, status: row.status, owner: row.owner, agent: row.agent, sellToken: row.sell_token, buyToken: row.buy_token, sellAmountUnits: row.sell_amount, fundedAmountUnits: row.funded_amount, paymentTransactionHash: row.payment_transaction, lifecycleTransactionHash: row.lifecycle_transaction, kind: row.kind, occurredAt: row.occurred_at.toISOString(), updatedAt: row.updated_at.toISOString() }));
+    const own = ownRows.map((row) => ({ recordType: "aqua" as const, id: row.id, status: row.status, owner: row.owner, agent: row.agent, sellToken: row.sell_token, buyToken: row.buy_token, sellAmountUnits: row.sell_amount, fundedAmountUnits: row.funded_amount, paymentTransactionHash: row.payment_transaction, lifecycleTransactionHash: row.lifecycle_transaction, activationError: row.activation_error, kind: row.kind, occurredAt: row.occurred_at.toISOString(), updatedAt: row.updated_at.toISOString() }));
     const subscribed = subscribedRows.map((row) => ({ recordType: "subscribed" as const, id: row.id, status: "confirmed", watchedAddress: row.watched_address, transactionHash: row.transaction_hash, sellToken: row.sell_token, buyToken: row.buy_token, sellAmountUnits: row.sell_amount, buyAmountUnits: row.buy_amount, kind: "swap", occurredAt: row.occurred_at.toISOString(), updatedAt: row.updated_at.toISOString() }));
     const selected = [...own, ...subscribed].filter((item) => query.status === undefined || item.status === query.status)
       .filter((item) => query.address === undefined || (item.recordType === "aqua" ? item.owner === query.address || item.agent === query.address : item.watchedAddress === query.address))
@@ -534,7 +585,7 @@ export class TradeApiService {
   }
 
   public async createCancellation(tradeId: string, owner: Address) {
-    const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions FROM agent_order_operations WHERE id=${tradeId} AND owner=${owner}`;
+    const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions,owner,agent,sell_token FROM agent_order_operations WHERE id=${tradeId} AND owner=${owner}`;
     const operation = operations[0];
     if (operation === undefined) throw new AppError(404, "urn:aqua:error:trade", "Trade was not found");
     if (operation.state === "cancelled") throw new AppError(409, "urn:aqua:error:cancelled", "Trade is already cancelled");
@@ -559,7 +610,7 @@ export class TradeApiService {
     const rows = await this.db<{ id: string; trade_id: string; cancellation_hash: Hash; action_payload: unknown; typed_data: unknown; expires_at: Date; used_at: Date | null }[]>`SELECT id,trade_id,cancellation_hash,action_payload,typed_data,expires_at,used_at FROM trade_cancellations WHERE id=${cancellationId} AND trade_id=${tradeId}`;
     const cancellation = rows[0];
     if (cancellation?.used_at !== null || cancellation.expires_at <= new Date()) throw new AppError(409, "urn:aqua:error:cancellation", "Cancellation is missing, expired, or already used");
-    const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions FROM agent_order_operations WHERE id=${tradeId} AND owner=${owner}`;
+    const operations = await this.db<OperationRow[]>`SELECT id,state,payment_transaction,deployment_transaction,lifecycle_transaction,action_payload,lifecycle_signature,prerequisite_transactions,owner,agent,sell_token FROM agent_order_operations WHERE id=${tradeId} AND owner=${owner}`;
     const operation = operations[0];
     if (operation === undefined) throw new AppError(404, "urn:aqua:error:trade", "Trade was not found");
     const typed = parseRequired(typedDataSchema, cancellation.typed_data, "Cancellation typed data");

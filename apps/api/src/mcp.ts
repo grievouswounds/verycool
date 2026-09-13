@@ -2,12 +2,12 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { AppError, addressSchema, hashSchema, hexSchema, parseBoundedJsonRequest, quantitySchema, subscribedTradesWipeSchema, subscribedTradesWipeToolSchema, tradePreviewRequestSchema, tradesListQuerySchema } from "@aqua/core";
-import type { Address, AuthenticatedPrincipal, Hash, Hex, RpcPort } from "@aqua/core";
+import { AppError, addressSchema, hashSchema, hexSchema, jsonable, mcpResult, parseBoundedJsonRequest, presentBalances, presentPostTrade, presentRequestTrade, presentTrades, quantitySchema, subscribedTradesWipeSchema, subscribedTradesWipeToolSchema, tradePreviewRequestSchema, tradesListQuerySchema } from "@aqua/core";
+import type { Address, AuthenticatedPrincipal, Hash, Hex, RpcPort, RuntimeManifest } from "@aqua/core";
 import type { AgentVault, AuthService } from "@aqua/adapters";
 import type { ActivityService } from "@aqua/activity";
 import { LedgerX402PaymentHeaders } from "@aqua/x402-client";
-import { hexToQuantity } from "@aqua/evm";
+import { bufferedGasLimit, decodeUint256, encodeAllowance, hexToQuantity, readWalletBalances, rpcWithBalance, selector, shouldSkipTokenApprove, walletBalanceCatalog } from "@aqua/evm";
 import type { Eip712TypedData } from "@aqua/evm";
 import type { TradeApiService } from "@aqua/trade-api";
 import { JSONRPC_PAYMENT_REQUIRED_CODE } from "@aqua/x402-adapter";
@@ -21,6 +21,8 @@ export interface HostedMcpDependencies {
   readonly activity: ActivityService;
   readonly agentVault: AgentVault;
   readonly rpc: RpcPort;
+  readonly permit2: Address;
+  readonly manifest: RuntimeManifest;
 }
 
 const prerequisiteSchema = z.object({
@@ -29,20 +31,12 @@ const prerequisiteSchema = z.object({
 }).strict();
 const typedDataSchema = z.custom<Eip712TypedData>((value) => typeof value === "object" && value !== null && "domain" in value && "types" in value && "primaryType" in value && "message" in value);
 
-const jsonable = (value: unknown): unknown => {
-  if (typeof value === "bigint") return value.toString();
-  if (Array.isArray(value)) return z.array(z.unknown()).parse(value).map(jsonable);
-  if (value !== null && typeof value === "object") {
-    const record = z.record(z.string(), z.unknown()).parse(value);
-    return Object.fromEntries(Object.entries(record).map(([key, item]: [string, unknown]) => [key, jsonable(item)]));
-  }
-  return value;
-};
 const jsonString = (value: unknown): string => JSON.stringify(jsonable(value));
-const output = (body: unknown) => {
+const output = (body: unknown, present?: (value: unknown) => string) => {
   const safe = jsonable(body);
-  return { content: [{ type: "text" as const, text: jsonString(safe) }], structuredContent: typeof safe === "object" && safe !== null ? z.record(z.string(), z.unknown()).parse(safe) : { result: safe } };
+  return mcpResult(safe, present === undefined ? jsonString(safe) : present(safe));
 };
+const getBalancesInputSchema = z.object({ address: addressSchema.optional() }).strict();
 const schema = (value: z.ZodType): Record<string, unknown> => {
   const json = z.record(z.string(), z.unknown()).parse(z.toJSONSchema(value, { target: "draft-2020-12", io: "input" }));
   return json["type"] === "object" ? json : { type: "object", ...json };
@@ -56,6 +50,7 @@ const tools = [
   { name: "subscribe_to_user", description: "Subscribe to confirmed trades for an EVM address.", inputSchema: schema(z.object({ address: addressSchema }).strict()) },
   { name: "unsubscribe_from_user", description: "Stop collecting trades for an address without deleting its stored records.", inputSchema: schema(z.object({ address: addressSchema }).strict()) },
   { name: "wipe_subscribed_trades", description: "Delete stored subscribed-wallet trades for one address or all addresses; subscriptions remain active. For one address set scope=address and address. For all set scope=all and confirmation=WIPE_ALL_SUBSCRIBED_TRADES.", inputSchema: schema(subscribedTradesWipeToolSchema) },
+  { name: "get_balances", description: "Report the logged-in owner address, the bound trading agent address, and native ETH, wrapped native, and fixture-token balances for those wallets plus an optional extra address.", inputSchema: schema(getBalancesInputSchema) },
 ] as const;
 
 const setupHint = (owner: Address, origin: string, type: string): string => {
@@ -80,15 +75,27 @@ const waitReceipt = async (rpc: RpcPort, hash: Hash, timeoutMs: number): Promise
   return false;
 };
 
+const approveSelector = selector("approve(address,uint256)").toLowerCase();
+const fundingRequired = (preview: Readonly<Record<string, unknown>>): bigint | null => {
+  const parsed = z.object({ execution: z.object({ fundingAmountUnits: z.string().regex(/^(?:0|[1-9][0-9]*)$/u) }).loose() }).loose().safeParse(preview);
+  return parsed.success ? BigInt(parsed.data.execution.fundingAmountUnits) : null;
+};
 const executePrerequisites = async (dependencies: HostedMcpDependencies, owner: Address, agent: Address, preview: Readonly<Record<string, unknown>>): Promise<readonly Hash[]> => {
   const parsed = z.object({ transactions: z.array(prerequisiteSchema).max(2) }).loose().parse(preview["prerequisites"] ?? { transactions: [] });
   const hashes: Hash[] = [];
   const session = dependencies.rpc.session?.() ?? dependencies.rpc;
+  const required = fundingRequired(preview);
   for (const transaction of parsed.transactions) {
     if (transaction.from !== agent) throw new AppError(409, "urn:aqua:error:prerequisite", "Prerequisite does not belong to the bound agent");
+    const isApprove = transaction.data.toLowerCase().startsWith(approveSelector);
+    if (isApprove && required !== null) {
+      const allowance = decodeUint256(await session.call({ to: transaction.to, data: encodeAllowance(agent, dependencies.permit2) }));
+      if (shouldSkipTokenApprove({ allowance, required })) continue;
+    }
     const [nonce, gasPrice, priority] = await Promise.all([session.transactionCount(agent), session.gasPrice(), session.maxPriorityFeePerGas()]);
     const value = hexToQuantity(transaction.value);
-    const gas = transaction.gas === undefined ? await session.estimateGas({ from: agent, to: transaction.to, data: transaction.data, value: transaction.value }) : hexToQuantity(transaction.gas);
+    const estimated = transaction.gas === undefined ? await session.estimateGas({ from: agent, to: transaction.to, data: transaction.data, value: transaction.value }) : hexToQuantity(transaction.gas);
+    const gas = bufferedGasLimit(estimated);
     const raw = await dependencies.agentVault.signTransaction(owner, {
       chainId: BigInt(transaction.chainId), nonce, maxPriorityFeePerGas: priority, maxFeePerGas: gasPrice * 2n + priority, gas, to: transaction.to, value, data: transaction.data,
     });
@@ -105,7 +112,7 @@ const callTool = async (dependencies: HostedMcpDependencies, principal: Authenti
   try {
     if (name === "request_trade") {
       const result = await dependencies.tradeApi.createPreview(tradePreviewRequestSchema.parse(arguments_), principal);
-      return output(result.body);
+      return output(result.body, presentRequestTrade);
     }
     if (name === "post_trade") {
       const { previewId, previewHash } = z.object({ previewId: z.uuid(), previewHash: hashSchema }).strict().parse(arguments_);
@@ -113,7 +120,7 @@ const callTool = async (dependencies: HostedMcpDependencies, principal: Authenti
       if (preview["previewHash"] !== previewHash) throw new AppError(409, "urn:aqua:error:preview-hash", "Trade preview hash does not match");
       const policy = z.object({ kind: z.string() }).loose().safeParse(z.record(z.string(), z.unknown()).parse(preview["normalizedTrade"] ?? {})["policy"]);
       if (policy.success && policy.data.kind !== "market") {
-        return output({ warning: "Hosted demo fills are market orders. Resting and armed orders need the local order-worker or stdio bridge.", previewId, previewHash });
+        return output({ warning: "Hosted demo fills are market orders. Resting and armed orders need the local order-worker or stdio bridge.", previewId, previewHash }, presentPostTrade);
       }
       const lifecycle = typedDataSchema.parse(preview["lifecycle"]);
       const additional = z.array(typedDataSchema).parse(preview["additionalLifecycles"] ?? []);
@@ -136,9 +143,9 @@ const callTool = async (dependencies: HostedMcpDependencies, principal: Authenti
         const payment = headers["payment-signature"] ?? headers["PAYMENT-SIGNATURE"] ?? null;
         result = await dependencies.tradeApi.submit(input, principal, payment, hashes);
       }
-      return output(result.body);
+      return output({ ...result.body, previewId, previewHash }, presentPostTrade);
     }
-    if (name === "get_trades") return output(await dependencies.tradeApi.listTrades(tradesListQuerySchema.parse(arguments_), owner));
+    if (name === "get_trades") return output(await dependencies.tradeApi.listTrades(tradesListQuerySchema.parse(arguments_), owner), presentTrades);
     if (name === "cancel_trade") {
       const { tradeId } = z.object({ tradeId: z.uuid() }).strict().parse(arguments_);
       const created = await dependencies.tradeApi.createCancellation(tradeId, owner);
@@ -155,6 +162,14 @@ const callTool = async (dependencies: HostedMcpDependencies, principal: Authenti
     }
     if (name === "wipe_subscribed_trades") {
       return output(await dependencies.tradeApi.wipeSubscribed(subscribedTradesWipeSchema.parse(arguments_), owner));
+    }
+    if (name === "get_balances") {
+      const parsed = getBalancesInputSchema.parse(arguments_);
+      const agent = await dependencies.agentVault.peekAgent(owner);
+      return output(await readWalletBalances({
+        rpc: rpcWithBalance(dependencies.rpc), ...walletBalanceCatalog(dependencies.manifest),
+        owner, agent, ...(parsed.address === undefined ? {} : { inspect: parsed.address }),
+      }), presentBalances);
     }
     throw new AppError(404, "urn:aqua:error:tool", "Unknown tool");
   } catch (error: unknown) {

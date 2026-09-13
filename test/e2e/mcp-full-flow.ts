@@ -31,7 +31,7 @@ try {
   const listed = await client.listTools();
   transcript.push({ method: "tools/list" });
   const names = listed.tools.map(({ name }) => name).sort();
-  const required = ["cancel_trade", "get_trades", "post_trade", "request_trade", "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades"];
+  const required = ["cancel_trade", "get_balances", "get_trades", "post_trade", "request_trade", "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades"];
   if (JSON.stringify(names) !== JSON.stringify(required)) throw new Error(`Unexpected MCP tools: ${names.join(",")}`);
   const scenarios = await runTradeScenarios(call);
   await call("subscribe_to_user", { address: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" });

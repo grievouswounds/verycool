@@ -4,16 +4,20 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, InitializedNotificationSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { PayingHttpClient, parseHttpJson } from "@aqua/x402-client";
 import { awaitingDelegation } from "./post-trade-status.ts";
+import { bindFixtureToken } from "./fixture-bind.ts";
 import {
-  MAX_SUBPROCESS_BYTES, addressSchema, formatTokenAmount, hashSchema, hexSchema, localProfileDefaults, parseStrictJson,
-  quantitySchema, readBoundedFileJson, readBoundedText, subscribedTradesWipeSchema, subscribedTradesWipeToolSchema, tradePreviewRequestSchema,
-  tradesListQuerySchema,
+  MAX_SUBPROCESS_BYTES, accessTokenSubject, addressSchema, formatTokenAmount, hashSchema, hexSchema, jsonable, loadRuntimeManifest, localProfileDefaults,
+  mcpResult, parseStrictJson, presentBalances, presentPostTrade, presentRequestTrade, presentTrades, quantitySchema, readBoundedFileJson, readBoundedText,
+  subscribedTradesWipeSchema, subscribedTradesWipeToolSchema, tradePreviewRequestSchema, tradesListQuerySchema,
 } from "@aqua/core";
 import type { Address, Hash, Hex } from "@aqua/core";
-import { hexToQuantity, createPooledRpcClient } from "@aqua/evm";
+import {
+  bufferedGasLimit, createPooledRpcClient, decodeUint256, encodeAllowance, hexToQuantity, readWalletBalances, rpcWithBalance, selector,
+  shouldSkipTokenApprove, walletBalanceCatalog,
+} from "@aqua/evm";
 import { z } from "zod";
 import { applyLedgerArgv } from "../../../scripts/ledger-mode.ts";
 import { oauthAccessToken } from "./oauth.ts";
@@ -44,6 +48,7 @@ const rpc = createPooledRpcClient({ id: Number.parseInt(Bun.env["AQUA_CHAIN_ID"]
 type BridgeConfig = z.infer<typeof configurationSchema>;
 interface Session {
   readonly accessToken: string;
+  readonly owner: Address;
   readonly config: BridgeConfig;
   readonly http: PayingHttpClient;
 }
@@ -69,19 +74,10 @@ const prerequisiteSchema = z.object({
 }).strict();
 const prerequisitesSchema = z.object({ transactions: z.array(prerequisiteSchema).max(2) }).loose();
 const signedTransactionSchema = z.object({ address: addressSchema, rawTransaction: hexSchema }).strict();
-const jsonable = (value: unknown): unknown => {
-  if (typeof value === "bigint") return value.toString();
-  if (Array.isArray(value)) return z.array(z.unknown()).parse(value).map(jsonable);
-  if (value !== null && typeof value === "object") {
-    const record = z.record(z.string(), z.unknown()).parse(value);
-    return Object.fromEntries(Object.entries(record).map(([key, item]: [string, unknown]) => [key, jsonable(item)]));
-  }
-  return value;
-};
 const jsonString = (value: unknown): string => JSON.stringify(jsonable(value));
-const output = (body: unknown) => {
+const output = (body: unknown, present?: (value: unknown) => string) => {
   const safe = jsonable(body);
-  return { content: [{ type: "text" as const, text: jsonString(safe) }], structuredContent: typeof safe === "object" && safe !== null ? z.record(z.string(), z.unknown()).parse(safe) : { result: safe } };
+  return mcpResult(safe, present === undefined ? jsonString(safe) : present(safe));
 };
 const signTransaction = async (config: BridgeConfig, transaction: { readonly chainId: number; readonly nonce: bigint; readonly maxPriorityFeePerGas: bigint; readonly maxFeePerGas: bigint; readonly gas: bigint; readonly to: Address; readonly value: bigint; readonly data: Hex }): Promise<Hex> => {
   const child = Bun.spawn([process.execPath, config.signerProgram, "sign-transaction"], { stdin: "pipe", stdout: "pipe", stderr: "inherit", env: Bun.env });
@@ -97,7 +93,7 @@ const signTransaction = async (config: BridgeConfig, transaction: { readonly cha
   return result.rawTransaction;
 };
 const waitForReceipt = async (hash: Hash): Promise<void> => {
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     const receipt = await rpc.transactionReceipt(hash);
     if (receipt?.status === "success") return;
@@ -106,13 +102,26 @@ const waitForReceipt = async (hash: Hash): Promise<void> => {
   }
   throw new Error(`Prerequisite transaction confirmation timed out: ${hash}`);
 };
+const approveSelector = selector("approve(address,uint256)").toLowerCase();
+const fundingRequired = (preview: Readonly<Record<string, unknown>>): bigint | null => {
+  const parsed = z.object({ execution: z.object({ fundingAmountUnits: z.string().regex(/^(?:0|[1-9][0-9]*)$/u) }).loose() }).loose().safeParse(preview);
+  return parsed.success ? BigInt(parsed.data.execution.fundingAmountUnits) : null;
+};
 const executePrerequisites = async (session: Session, preview: Readonly<Record<string, unknown>>): Promise<readonly Hash[]> => {
   const parsed = prerequisitesSchema.parse(preview["prerequisites"]); const hashes: Hash[] = [];
+  const required = fundingRequired(preview);
+  const permit2 = (await loadRuntimeManifest([])).contracts.permit2.address;
   for (const transaction of parsed.transactions) {
     if (transaction.from !== session.config.agent || transaction.chainId !== preview["chainId"]) throw new Error("Reviewed prerequisite transaction does not belong to the local agent and chain");
     const pinned = rpc.session();
+    const isApprove = transaction.data.toLowerCase().startsWith(approveSelector);
+    if (isApprove && required !== null) {
+      const allowance = decodeUint256(await pinned.call({ to: transaction.to, data: encodeAllowance(session.config.agent, permit2) }));
+      if (shouldSkipTokenApprove({ allowance, required })) continue;
+    }
     const [nonce, gasPrice, priority] = await Promise.all([pinned.transactionCount(session.config.agent), pinned.gasPrice(), pinned.maxPriorityFeePerGas()]);
-    const gas = transaction.gas === undefined ? await pinned.estimateGas({ from: session.config.agent, to: transaction.to, data: transaction.data, value: transaction.value }) : hexToQuantity(transaction.gas);
+    const estimated = transaction.gas === undefined ? await pinned.estimateGas({ from: session.config.agent, to: transaction.to, data: transaction.data, value: transaction.value }) : hexToQuantity(transaction.gas);
+    const gas = bufferedGasLimit(estimated);
     const raw = await signTransaction(session.config, { chainId: transaction.chainId, nonce, maxPriorityFeePerGas: priority, maxFeePerGas: gasPrice * 2n + priority, gas, to: transaction.to, value: hexToQuantity(transaction.value), data: transaction.data });
     const hash = await pinned.sendRawTransaction(raw); hashes.push(hash); await waitForReceipt(hash);
   }
@@ -219,6 +228,7 @@ const bindSession = async (accessToken: string): Promise<Session> => {
   });
   const session: Session = {
     accessToken,
+    owner: accessTokenSubject(accessToken),
     config,
     http: new PayingHttpClient({
       timeoutMs: 120_000,
@@ -256,8 +266,10 @@ const savePreview = async (session: Session, body: Readonly<Record<string, unkno
 
 const requestTrade = async (session: Session, arguments_: unknown) => {
   const parsed = tradePreviewRequestSchema.parse(arguments_);
-  const response = await api(session, "/v1/trade-previews", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(parsed) });
-  const body = await json(response); if (response.status === 201) await savePreview(session, z.record(z.string(), z.unknown()).parse(body)); return output(body);
+  const fixtures = (await loadRuntimeManifest([])).fixtures.tokens;
+  const bound = { ...parsed, sellToken: bindFixtureToken(parsed.sellToken, fixtures), buyToken: bindFixtureToken(parsed.buyToken, fixtures) };
+  const response = await api(session, "/v1/trade-previews", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bound) });
+  const body = await json(response); if (response.status === 201) await savePreview(session, z.record(z.string(), z.unknown()).parse(body)); return output(body, presentRequestTrade);
 };
 const postTrade = async (session: Session, arguments_: unknown) => {
   const { previewId, previewHash } = z.object({ previewId: z.uuid(), previewHash: hashSchema }).strict().parse(arguments_);
@@ -275,26 +287,38 @@ const postTrade = async (session: Session, arguments_: unknown) => {
     const error = z.object({ type: z.string() }).loose().safeParse(validationResult.body);
     if (!error.success || error.data.type !== "urn:aqua:error:delegation-required") throw new Error(`Aqua API 409: ${jsonString(validationResult.body)}`);
     const transactionHash = await ensureDelegation(session, preview);
-    return output(awaitingDelegation(previewId, previewHash, transactionHash));
+    return output(awaitingDelegation(previewId, previewHash, transactionHash), presentPostTrade);
   }
   if (validation.status !== 402) {
     const submitted = z.record(z.string(), z.unknown()).parse(await json(validation));
-    return output(lastClearSigning === null ? submitted : { ...submitted, clearSigning: lastClearSigning });
+    const body = { ...submitted, previewId, previewHash };
+    return output(lastClearSigning === null ? body : { ...body, clearSigning: lastClearSigning }, presentPostTrade);
   }
   const prerequisiteTransactionHashes = await executePrerequisites(session, preview);
   headers.set("aqua-prerequisite-transactions", Buffer.from(JSON.stringify(prerequisiteTransactionHashes)).toString("base64url"));
   const network = `eip155:${chainIdSchema.parse(preview["chainId"])}` as const;
   const response = await session.http.retryPayment(validation, new URL("/v1/trades", session.config.apiUrl), { method: "POST", headers, body }, network);
   const submitted = z.record(z.string(), z.unknown()).parse(await json(response));
-  return output(lastClearSigning === null ? submitted : { ...submitted, clearSigning: lastClearSigning });
+  const paid = { ...submitted, previewId, previewHash };
+  return output(lastClearSigning === null ? paid : { ...paid, clearSigning: lastClearSigning }, presentPostTrade);
 };
 const getTrades = async (session: Session, arguments_: unknown) => {
   const parsed = tradesListQuerySchema.parse(arguments_);
   const query = new URLSearchParams(); for (const [key, value] of Object.entries(parsed)) if (value !== undefined) query.set(key, String(value));
-  return output(await json(await api(session, `/v1/trades?${query.toString()}`)));
+  return output(await json(await api(session, `/v1/trades?${query.toString()}`)), presentTrades);
 };
 const subscription = async (session: Session, arguments_: unknown, remove: boolean) => { const { address } = z.object({ address: addressSchema }).strict().parse(arguments_); return output(await json(await api(session, remove ? `/v1/trade-subscriptions/${address}` : "/v1/trade-subscriptions", remove ? { method: "DELETE" } : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }) }))); };
 const wipe = async (session: Session, arguments_: unknown) => { const parsed = subscribedTradesWipeSchema.parse(arguments_); return output(await json(await api(session, "/v1/trade-subscriptions/trades/wipe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(parsed) }))); };
+const getBalancesInputSchema = z.object({ address: addressSchema.optional() }).strict();
+const getBalances = async (session: Session, arguments_: unknown) => {
+  const parsed = getBalancesInputSchema.parse(arguments_);
+  const manifest = await loadRuntimeManifest([]);
+  return output(await readWalletBalances({
+    rpc: rpcWithBalance(rpc), ...walletBalanceCatalog(manifest),
+    owner: session.owner, agent: session.config.agent,
+    ...(parsed.address === undefined ? {} : { inspect: parsed.address }),
+  }), presentBalances);
+};
 const cancelTrade = async (session: Session, arguments_: unknown) => {
   const { tradeId } = z.object({ tradeId: z.uuid() }).strict().parse(arguments_);
   const created = z.object({ cancellationId: z.uuid(), cancellationHash: hashSchema, lifecycle: z.record(z.string(), z.unknown()) }).loose()
@@ -317,8 +341,12 @@ const tools = [
   { name: "subscribe_to_user", description: "Subscribe to confirmed trades for an EVM address.", inputSchema: schema(z.object({ address: addressSchema }).strict()) },
   { name: "unsubscribe_from_user", description: "Stop collecting trades for an address without deleting its stored records.", inputSchema: schema(z.object({ address: addressSchema }).strict()) },
   { name: "wipe_subscribed_trades", description: "Delete stored subscribed-wallet trades for one address or all addresses; subscriptions remain active. For one address set scope=address and address. For all set scope=all and confirmation=WIPE_ALL_SUBSCRIBED_TRADES.", inputSchema: schema(subscribedTradesWipeToolSchema) },
+  { name: "get_balances", description: "Report the logged-in Ledger owner address, the bound trading agent address, and native ETH, wrapped native, and fixture-token balances for those wallets plus an optional extra address.", inputSchema: schema(getBalancesInputSchema) },
 ] as const;
 const server = new Server({ name: "aqua-ledger-key-ring", version: "1.0.0" }, { capabilities: { tools: {} } });
+server.setNotificationHandler(InitializedNotificationSchema, async () => {
+  await ensureSession();
+});
 server.setRequestHandler(ListToolsRequestSchema, () => Promise.resolve({ tools }));
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
@@ -331,6 +359,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (request.params.name === "subscribe_to_user") return await subscription(session, arguments_, false);
     if (request.params.name === "unsubscribe_from_user") return await subscription(session, arguments_, true);
     if (request.params.name === "wipe_subscribed_trades") return await wipe(session, arguments_);
+    if (request.params.name === "get_balances") return await getBalances(session, arguments_);
     throw new Error("Unknown tool");
   } catch (error) {
     console.error(error);

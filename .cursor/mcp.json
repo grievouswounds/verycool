@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "aqua-ledger-key-ring": {
+      "command": "/bin/bash",
+      "args": ["scripts/aqua-mcp-cursor.sh"]
+    }
+  }
+}

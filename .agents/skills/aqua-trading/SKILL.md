@@ -4,25 +4,26 @@ description: >-
   Drive the Aqua Ledger Key Ring MCP trading server. Use when an agent needs to
   preview, fund, submit, list, cancel, or subscribe to Aqua trades on Sepolia
   through request_trade, post_trade, get_trades, cancel_trade, subscribe_to_user,
-  unsubscribe_from_user, or wipe_subscribed_trades. Also use for the OAuth 2.1
-  plus Ledger FIDO2 ceremony and the x402 Permit2 payment step.
+  unsubscribe_from_user, wipe_subscribed_trades, or get_balances. Also use for the
+  OAuth 2.1 plus Ledger FIDO2 ceremony and the x402 Permit2 payment step.
 ---
 
 # Aqua trading MCP
 
-Aqua exposes seven MCP tools over a local stdio bridge (`bun apps/mcp-bridge/src/main.ts --prod`) and hosted Streamable HTTP `/mcp`.
+Aqua exposes eight MCP tools over a local stdio bridge. In Cursor that is `scripts/aqua-mcp-cursor.sh`. Hosted Streamable HTTP `/mcp` remains for conformance checks.
 
 ## Tools
 
-- `request_trade` — resolve, quote, simulate. Map language onto `policy.kind`: market, limit, stopMarket/stopLimit, takeProfitMarket/takeProfitLimit, trailingStop, oco, bracket.
-- `post_trade` — sign the reviewed lifecycle, satisfy x402 exact Permit2 funding, submit. Reports a Clear Signing verdict when the owner Ledger signed.
-- `get_trades` — own, subscribed, or combined records.
+- `request_trade` — resolve, quote, simulate. Map language onto `policy.kind`: market, limit, stopMarket/stopLimit, takeProfitMarket/takeProfitLimit, trailingStop, oco, bracket. The text body is markdown tables; keep `previewId` / `previewHash` from those tables or from `structuredContent`. Then call `post_trade` with those ids.
+- `post_trade` — sign the reviewed lifecycle, satisfy x402 exact Permit2 funding, submit. Reports a Clear Signing verdict when the owner Ledger signed. A first call may return `awaiting_delegation`; call `post_trade` again with the same ids. If the tool returns `fundedActivationPending`, call `post_trade` again with the same `previewId` / `previewHash`. Do not start a new `request_trade` after funding. Activation is not automatic.
+- `get_balances` — logged-in owner address, bound trading agent address, native ETH, wrapped native, and fixture tokens (`aUSD` / `aETH` on Sepolia). Use this before trading to confirm both wallets have gas and sell tokens. Optional `address` inspects one extra wallet.
+- `get_trades` — own, subscribed, or combined records. A market fill is `broadcast` when `lifecycleTransactionHash` is set. That hash is the keeper calling `orderVaultFactory`; it does not appear on the LKRP agent. Agent Etherscan history is Permit2 `approve`s only.
 - `cancel_trade` — cancel resting or unwind armed orders.
 - `subscribe_to_user` / `unsubscribe_from_user` / `wipe_subscribed_trades`.
 
 ## Auth
 
-OAuth 2.1 with PKCE S256, RFC 7591 dynamic registration, RFC 9728 protected-resource metadata. Ledger FIDO2 (Security Key app) mints a PASETO `v4.public` with `amr: ["fido2","hwk"]`. Hardware is required on every trade route. Stdio Jam uses the bridge; do not point Jam at hosted `/mcp`.
+OAuth 2.1 with PKCE S256, RFC 7591 dynamic registration, RFC 9728 protected-resource metadata. Ledger FIDO2 (Security Key app) mints a PASETO `v4.public` with `amr: ["fido2","hwk"]`. The first Cursor stdio connect runs the Security Key ceremony; later tool calls refresh the PASETO bearer from `oauth.json`. Hardware is required on every trade route. Do not point this client at hosted `/mcp` — that path signs with a custodial agent vault.
 
 ## Payment
 

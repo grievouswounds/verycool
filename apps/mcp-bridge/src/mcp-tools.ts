@@ -10,6 +10,7 @@ export const requiredAquaTools = {
   subscribe_to_user: "subscribe_to_user",
   unsubscribe_from_user: "unsubscribe_from_user",
   wipe_subscribed_trades: "wipe_subscribed_trades",
+  get_balances: "get_balances",
 } as const;
 
 export type AquaMcpToolName = keyof typeof requiredAquaTools;
@@ -69,16 +70,9 @@ export const discoverAquaTools = async (options: {
     if (tool === undefined) throw new Error(`Hosted MCP is missing required operation ${name}`);
     return schemaFingerprint(tool.inputSchema);
   };
+  const names = Object.keys(requiredAquaTools) as AquaMcpToolName[];
   return {
     mcpUrl,
-    fingerprints: Object.freeze({
-      request_trade: fingerprint("request_trade"),
-      post_trade: fingerprint("post_trade"),
-      get_trades: fingerprint("get_trades"),
-      cancel_trade: fingerprint("cancel_trade"),
-      subscribe_to_user: fingerprint("subscribe_to_user"),
-      unsubscribe_from_user: fingerprint("unsubscribe_from_user"),
-      wipe_subscribed_trades: fingerprint("wipe_subscribed_trades"),
-    }),
+    fingerprints: Object.freeze(Object.fromEntries(names.map((name) => [name, fingerprint(name)])) as Record<AquaMcpToolName, string>),
   };
 };

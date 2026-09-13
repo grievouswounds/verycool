@@ -3,6 +3,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { MAX_HTTP_BODY_BYTES, readBoundedFileJson, readBoundedJson } from "@aqua/core";
 import { z } from "zod";
+import { shouldReuseOauthCache, type OauthCeremonyState } from "./oauth-reuse.ts";
+
+export const oauthCeremonyState: OauthCeremonyState = { completed: false };
 
 const tokenSchema = z.object({
   access_token: z.string().min(1), token_type: z.literal("Bearer"), expires_in: z.number().int().positive(),
@@ -59,14 +62,25 @@ export const oauthAccessToken = async (apiUrl: string, cachePath: string, callba
   );
   const issuer = metadata.authorization_servers[0];
   if (issuer === undefined) throw new Error("OAuth protected-resource metadata has no authorization server");
-  const cached = await load(cachePath);
-  if (cached?.resource === metadata.resource && cached.expiresAt > Date.now() + 30_000) return cached.accessToken;
-  if (cached?.resource === metadata.resource) {
-    try {
-      const refreshed = await tokenRequest(issuer, { grant_type: "refresh_token", refresh_token: cached.refreshToken, client_id: cached.clientId, resource: cached.resource });
-      const next = { clientId: cached.clientId, resource: cached.resource, refreshToken: refreshed.refresh_token, accessToken: refreshed.access_token, expiresAt: Date.now() + refreshed.expires_in * 1000 };
-      await save(cachePath, next); return next.accessToken;
-    } catch { /* An expired or consumed refresh token falls through to interactive OAuth. */ }
+  const reuseDisk = shouldReuseOauthCache(Bun.env, oauthCeremonyState);
+  if (reuseDisk) {
+    const cached = await load(cachePath);
+    if (cached?.resource === metadata.resource && cached.expiresAt > Date.now() + 30_000) {
+      oauthCeremonyState.completed = true;
+      return cached.accessToken;
+    }
+    if (cached?.resource === metadata.resource) {
+      try {
+        const refreshed = await tokenRequest(issuer, { grant_type: "refresh_token", refresh_token: cached.refreshToken, client_id: cached.clientId, resource: cached.resource });
+        const next = { clientId: cached.clientId, resource: cached.resource, refreshToken: refreshed.refresh_token, accessToken: refreshed.access_token, expiresAt: Date.now() + refreshed.expires_in * 1000 };
+        await save(cachePath, next);
+        oauthCeremonyState.completed = true;
+        return next.accessToken;
+      } catch {
+        throw new Error("OAuth refresh failed. Reconnect the Aqua MCP client so the Security Key can authorize a new session.");
+      }
+    }
+    throw new Error("OAuth cache is missing or the audience changed. Complete Ledger FIDO2 once, or warm oauth.json for mcp-check.");
   }
 
   const redirectUri = `http://127.0.0.1:${String(callbackPort)}/callback`;
@@ -99,5 +113,7 @@ export const oauthAccessToken = async (apiUrl: string, cachePath: string, callba
   try { authorizationCode = await code; } finally { clearTimeout(timer); await Bun.sleep(50); await callback.stop(true); }
   const tokens = await tokenRequest(issuer, { grant_type: "authorization_code", code: authorizationCode, client_id: registration.client_id, redirect_uri: redirectUri, resource: metadata.resource, code_verifier: verifier });
   const state = { clientId: registration.client_id, resource: metadata.resource, refreshToken: tokens.refresh_token, accessToken: tokens.access_token, expiresAt: Date.now() + tokens.expires_in * 1000 };
-  await save(cachePath, state); return state.accessToken;
+  await save(cachePath, state);
+  oauthCeremonyState.completed = true;
+  return state.accessToken;
 };
