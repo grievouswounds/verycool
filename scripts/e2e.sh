@@ -63,6 +63,9 @@ if [[ -z "${AQUA_PYTHON:-}" ]]; then
 fi
 
 export AQUA_E2E=1
+# Host .env.local (Neon) must not override the isolated e2e Postgres URL or PGDATABASE.
+bun() { command bun --no-env-file "$@"; }
+unset PGDATABASE PGHOST PGHOST_UNPOOLED PGUSER POSTGRES_DATABASE POSTGRES_HOST POSTGRES_PASSWORD POSTGRES_PRISMA_URL POSTGRES_URL POSTGRES_URL_NON_POOLING POSTGRES_URL_NO_SSL POSTGRES_USER DATABASE_URL_UNPOOLED
 work="$(mktemp -d "${TMPDIR:-/tmp}/aqua-e2e.XXXXXX")"
 processes=()
 cleanup() {
