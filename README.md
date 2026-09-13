@@ -18,21 +18,13 @@ The product is the **speakeasy in the middle**: agents get a machine-readable or
 - ⛓️ **Off-chain book, on-chain evidence.** Workers index `Shipped` / `Docked` / `Pushed` / `Pulled` and SwapVM `Swapped` into Postgres. The keeper may only hit allowlisted selectors on the intent controller, vault factory, and `BoundedMatcher`.
 - 🪪 **Hardware AMR.** OAuth 2.1 + PKCE + Ledger Security Key (FIDO2). Access tokens are PASETO `v4.public` with `amr: ["fido2","hwk"]`.
 
-**Hosted MCP is custodial for the agent key.** Ledger FIDO2 on The Aqua Room proves who started the MCP Jam session. It does not gate decryption of the per-owner agent key. `AQUA_AGENT_KEK` plus a database dump can sign lifecycle and Permit2 payloads for every provisioned owner, within that owner's on-chain Policy. Caps expire in seven days. Compromise playbook: rotate the KEK (`kek_id` in `wrap_context`), revoke delegations on-chain, and reprovision. Do not treat hosted `/mcp` as non-custodial.
-
-The local stdio bridge `aqua-ledger-key-ring` still keeps the agent key in Ledger Key Ring ciphertext on the laptop. `wallet-cli ring destroy` tears down the trustchain root (including Ledger Sync) and member rotation orphans old ciphertext.
-
-Hosted Streamable HTTP is `https://vercel-henna-gamma-46.vercel.app/mcp` (server name `aqua`). Unique `*.vercel.app` deployment URLs fail WebAuthn.
-
 ## How it works
 
 1. **Enroll.** `ledger-bootstrap` (physical `--prod` or Speculos `--dev`) creates LKRP-encrypted `agent` / `facilitator` / `keeper` / `paseto` keys. The secret broker writes `identity.json` (public addresses only).
 2. **Bind.** The MCP bridge proves possession of the agent (EIP-712) and the owner registers a **bounded delegation** (spend ceilings, allowed routers).
 3. **Preview.** `POST /v1/trade-previews` resolves tokens, classifies the intent, and returns a **five-minute immutable plan** plus RPC safety checks. The hash is what gets signed.
 4. **Pay + ship.** `POST /v1/trades` first returns x402 `PAYMENT-REQUIRED` (exact Permit2 on the **deployment chain**, any standard ERC-20 sell token). Retry settles the vault; Aqua `ship` / SwapVM run on-chain.
-5. **Index + keep.** Order worker projects the book from confirmed logs. Conditional orders (stop, trailing, OCO, bracket) fire through `AquaIntentController` + `BoundedMatcher` (max eight allowlisted calls).
-
-Local Anvil is chain **31337**. Live demo target is Ethereum **Sepolia (11155111)** with the vanity Aqua registry where it already exists, plus routers and intent contracts this repo deploys.
+5. **Index + keep.** Order worker projects the book from confirmed logs. Conditional orders (`stopMarket` / `stopLimit`, `trailingStop`, `oco`, `bracket`) fire through `AquaIntentController` + `BoundedMatcher` (max eight allowlisted calls).
 
 ## Architecture
 
@@ -48,6 +40,14 @@ Local Anvil is chain **31337**. Live demo target is Ethereum **Sepolia (11155111
 | Chain | Aqua, `AquaSwapVMRouter`, `LimitSwapVMRouter`, Permit2 `0x000000000022D473…`, x402 exact `0x402085c2…`, WETH, intent/vault/`BoundedMatcher` |
 
 Trust boundary: the API is a **language recognizer** (see [`docs/LANGSEC.md`](docs/LANGSEC.md)). Unknown JSON keys, non-canonical decimals, and off-allowlist calldata are rejected. Cubane is the first-party EVM stack (no first-party viem / ethers / 1inch SDK).
+
+## Custody model
+
+Local stdio (`aqua-ledger-key-ring`) keeps the agent key in Ledger Key Ring ciphertext on the laptop. `wallet-cli ring destroy` tears down the trustchain root (including Ledger Sync) and member rotation orphans old ciphertext. Speculos and Anvil are for development. Production custody is a real Ledger, `node-hid`, and released `wallet-cli`.
+
+**Hosted MCP is custodial for the agent key.** Ledger FIDO2 on The Aqua Room proves who started the MCP Jam session. It does not gate decryption of the per-owner agent key. `AQUA_AGENT_KEK` plus a database dump can sign lifecycle and Permit2 payloads for every provisioned owner, within that owner's on-chain Policy. Caps expire in seven days. Compromise playbook: rotate the KEK (`kek_id` in `wrap_context`), revoke delegations on-chain, and reprovision. Do not treat hosted `/mcp` as non-custodial.
+
+Hosted Streamable HTTP is `https://vercel-henna-gamma-46.vercel.app/mcp` (server name `aqua`). Unique `*.vercel.app` deployment URLs fail WebAuthn.
 
 ## Bounties
 
@@ -105,7 +105,7 @@ docker compose up --build
 
 Give WSL/Docker enough RAM for the first Speculos + Ledger app compile. Persist `WALLET_PASS` if you use the container volume so the keyring stays decryptable.
 
-Hot reload: `dev --prod` / `dev --dev`. No hot reload: `start --prod` / `start-emulated`. Same `--dev`/`--prod` flags apply to `ledger-bootstrap`, `e2e`, `mcp-check`, and `apps/mcp-bridge`.
+Hot reload: `dev --prod` / `dev --dev`. No hot reload: `aqua-start --prod` / `start-emulated`. Same `--dev`/`--prod` flags apply to `ledger-bootstrap`, `e2e`, `mcp-check`, and `apps/mcp-bridge`.
 
 ### Tests
 
@@ -117,9 +117,22 @@ aube run check                     # types, 100% type coverage, lint, policy, te
 
 Evidence lands in `reports/e2e/`. Speculos runs real app ELFs; it does not prove USB, firmware, or SE equivalence.
 
+## Configuration
+
+The runtime manifest is the source of truth (`--config <manifest>` or `AQUA_RUNTIME_MANIFEST`). Local `dev` writes `.data/runtime-manifest.json` (issuer, PASETO public keys, confirmations, indexer contracts). Those are **not** env vars.
+
+Overrides that still live in the environment:
+
+- `DATABASE_URL` — Postgres (Nix defaults this for local `dev`)
+- `AQUA_API_URL` — MCP bridge target. Literal default is `http://127.0.0.1:3000`; set `http://127.0.0.1:8787` for the standard `dev` stack
+- `AQUA_OAUTH_CALLBACK_PORT` — defaults to `41739`
+- `ONEINCH_API_KEY` — optional; price endpoints only
+- `AQUA_AGENT_KEK` — required to provision hosted agent keys
+- `AQUA_PUBLIC_ORIGIN` — required for hosted deploy / WebAuthn (`https://vercel-henna-gamma-46.vercel.app`)
+
 ## Chain profiles
 
-**Anvil 31337** — default `dev`/`start`. Manifest under `.data/` is verified (code hashes, Aqua bindings, matcher allowlists, fixture supply, seed orders) before the API serves.
+**Anvil 31337** — default `dev` / `aqua-start`. Manifest under `.data/` is verified (code hashes, Aqua bindings, matcher allowlists, fixture supply, seed orders) before the API serves.
 
 **Sepolia 11155111** — live explorer demo. Deployer key must **not** be Anvil account 0. Pocket-style RPCs often reject Foundry fee APIs; broadcasts may use a second RPC that supports `eth_sendRawTransaction`. A physical Ledger keyring **cannot** decrypt a Speculos keyring; a coworker with a Nano must bootstrap locally and redeploy intent/matcher (operator is immutable).
 
@@ -130,15 +143,15 @@ Tools: `request_trade`, `post_trade`, `get_trades`, `cancel_trade`, `subscribe_t
 On first start the isolated signer runs `wallet-cli ring init` if needed, stores **ciphertext + address only**, and binds the agent after OAuth. Fund that address with gas and sell tokens; register the suggested Ledger delegation before the first live trade.
 
 ```sh
-bun apps/mcp-bridge/src/main.ts --dev    # Speculos signer
-bun apps/mcp-bridge/src/main.ts --prod   # physical Ledger
+AQUA_API_URL=http://127.0.0.1:8787 bun apps/mcp-bridge/src/main.ts --dev    # Speculos signer
+AQUA_API_URL=http://127.0.0.1:8787 bun apps/mcp-bridge/src/main.ts --prod   # physical Ledger
 ```
 
-`AQUA_API_URL` defaults toward the local API (set it if not `http://127.0.0.1:8787` / `3000`). OAuth callback port defaults to `41739`.
+Without `AQUA_API_URL` the bridge defaults to `http://127.0.0.1:3000`, which is not the `dev` API. `AQUA_OAUTH_CALLBACK_PORT` defaults to `41739`.
 
 ## Hosted MCP (Acts 1–3)
 
-Two Ledger apps, never at the same time. Trades on hosted `/mcp` use neither.
+See [Custody model](#custody-model). Two Ledger apps, never at the same time. Trades on hosted `/mcp` use neither.
 
 1. **Act 1 — once, USB, terminal.** `nix develop`, quit Ledger Live, `AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app bun scripts/setup-hosted-owner.ts`. Ethereum app: SIWE. Security Key app: FIDO2 register **and immediately** FIDO2 authenticate (hardware PASETO). The script then `POST /v1/agents/provision`. Ethereum app again: one EIP-712 delegation per fixture token (`maxPerOrder = 1`, `maxPerDay = 100`, 7 days). Fund the printed agent. Optional `--fund`. Status: `GET /setup?owner=0x…` (read-only).
 2. **Act 2 — once per MCP Jam session.** Add `https://vercel-henna-gamma-46.vercel.app/mcp`. The Room opens in the default browser. Type the enrolled owner, Knock, confirm on the Security Key app. Redirect returns `code`, `state`, and `iss`.
@@ -152,11 +165,15 @@ Full schemas: `http://localhost:8787/docs` and `GET /v1/capabilities`.
 | --- | --- |
 | Auth | `POST /v1/auth/challenges`, `/sessions`, `/refresh` |
 | Trades | `POST /v1/trade-previews`, `POST`/`GET /v1/trades` (x402 exact Permit2) |
-| Agent / policy | `POST /v1/agents/me/challenges`, `PUT /v1/agents/me`, delegations |
+| Cancellations | `POST /v1/trades/:tradeId/cancellations`, `PUT …/cancellations/:cancellationId` |
+| Agent / policy | `POST /v1/agents/me/challenges`, `PUT /v1/agents/me`, `POST /v1/delegations/previews`, `POST /v1/delegations` |
 | Book / quotes | `POST /v1/trading`, `POST /v1/quotes/aqua` |
+| Prices | `GET /v1/prices/address/:address`, `GET /v1/prices/name/:name` |
 | Monitor | `/v1/erc20-monitor/*` (poller, not a websocket) |
+| Trade subscriptions | `POST`/`DELETE /v1/trade-subscriptions`, `POST /v1/trade-subscriptions/trades/wipe` (MCP `subscribe_*` / `wipe_subscribed_trades`; not the ERC-20 monitor) |
+| OAuth | `/.well-known/*`, `/authorize`, `/register`, `/token` (hosted MCP session) |
 
-Orders: market, limit, stop, trailing, take-profit, OCO, bracket. Policies: GTC, GTD, IOC, FOK, partial, AON, post-only, book-or-cancel. Amounts are canonical decimal strings; the deployment owns `CHAIN_ID`.
+Order kinds: `market`, `limit`, `stopMarket`, `stopLimit`, `trailingStop`, `takeProfitMarket`, `takeProfitLimit`, `oco`, `bracket`. Time-in-force: `gtc`, `gtd`, `ioc`, `fok`. Fill: `partial`, `allOrNone`. Post: `normal`, `postOnly`, `bookOrCancel`. Amounts are canonical decimal strings; the deployment owns `CHAIN_ID`.
 
 The API **never** takes a wallet key or broadcasts for the caller except through the isolated keeper/facilitator roles.
 
@@ -168,7 +185,7 @@ Arbitrary Aqua bytecode is out of scope: SwapVM instruction order is security-cr
 
 ## Hosted deploy
 
-`aube run deploy` / `nix develop -c deploy` bundles API + facilitator to Vercel and can register a **draft** Bazantic gateway. Needs `baz login`, production manifest, Neon `DATABASE_URL`, env signer. Hardware AMR routes (`/v1/trades`, previews, delegations) stay on the **local MCP bridge**, not the hosted `{endpoint}/mcp` tool-caller.
+`aube run deploy` / `nix develop -c deploy` bundles API + facilitator to Vercel and can register a **draft** Bazantic gateway. Needs `baz login`, production manifest, Neon `DATABASE_URL`, env signer, `AQUA_PUBLIC_ORIGIN`, and `AQUA_AGENT_KEK`. Hosted `/mcp` signs with the unwrapped owner agent key — see [Custody model](#custody-model).
 
 ## Deployments (Ethereum Sepolia)
 
@@ -210,7 +227,3 @@ We **reused** the vanity Aqua registry, canonical Permit2, x402 exact proxy, CRE
 ## Team
 
 Built as an ETHOnline project on this repo. See GitHub commit history for authors.
-
----
-
-Speculos and Anvil are for development. Production custody is a real Ledger, `node-hid`, and released `wallet-cli`.
