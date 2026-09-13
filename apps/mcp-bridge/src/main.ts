@@ -1,14 +1,15 @@
 /* eslint-disable @typescript-eslint/no-deprecated -- stdio MCP shares Server with hosted /mcp on SDK 1.29 */
 import "./json-bigint.mjs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { PayingHttpClient, parseHttpJson } from "@aqua/bazantic";
+import { PayingHttpClient, parseHttpJson } from "@aqua/x402-client";
 import {
-  addressSchema, formatTokenAmount, hashSchema, hexSchema, localProfileDefaults, quantitySchema, subscribedTradesWipeSchema,
-  tradePreviewRequestSchema, tradesListQuerySchema,
+  MAX_SUBPROCESS_BYTES, addressSchema, formatTokenAmount, hashSchema, hexSchema, localProfileDefaults, parseStrictJson,
+  quantitySchema, readBoundedFileJson, readBoundedText, subscribedTradesWipeSchema, tradePreviewRequestSchema,
+  tradesListQuerySchema,
 } from "@aqua/core";
 import type { Address, Hash, Hex } from "@aqua/core";
 import { hexToQuantity, createPooledRpcClient } from "@aqua/evm";
@@ -16,8 +17,6 @@ import { z } from "zod";
 import { applyLedgerArgv } from "../../../scripts/ledger-mode.ts";
 import { oauthAccessToken } from "./oauth.ts";
 import { signLedgerTypedData } from "./ledger.ts";
-import { retryAquaPayment } from "./payment.ts";
-import { discoverConfiguredAquaTools } from "./bazantic-tools.ts";
 
 applyLedgerArgv(Bun.argv.slice(2));
 
@@ -48,13 +47,17 @@ interface Session {
   readonly http: PayingHttpClient;
 }
 let sessionPromise: Promise<Session> | undefined;
+let lastClearSigning: Readonly<Record<string, unknown>> | null = null;
+
+const childJson = async (stdout: ReadableStream<Uint8Array>): Promise<unknown> =>
+  parseStrictJson(await readBoundedText(new Response(stdout), MAX_SUBPROCESS_BYTES));
 
 const signTypedData = async (config: BridgeConfig, typedData: Readonly<Record<string, unknown>>): Promise<`0x${string}`> => {
   const child = Bun.spawn([process.execPath, config.signerProgram, "sign-typed-data"], { stdin: "pipe", stdout: "pipe", stderr: "inherit", env: Bun.env });
   await child.stdin.write(jsonString({ typedData })); await child.stdin.end();
-  const text = await new Response(child.stdout).text();
+  const parsed = await childJson(child.stdout);
   if (await child.exited !== 0) throw new Error("Isolated LKRP signer failed");
-  const result = z.object({ address: addressSchema, signature: hexSignatureSchema }).strict().parse(JSON.parse(text));
+  const result = z.object({ address: addressSchema, signature: hexSignatureSchema }).strict().parse(parsed);
   if (result.address !== config.agent) throw new Error("Signer address does not match the bound agent");
   return result.signature;
 };
@@ -86,9 +89,9 @@ const signTransaction = async (config: BridgeConfig, transaction: { readonly cha
     nonce: transaction.nonce.toString(), maxPriorityFeePerGas: transaction.maxPriorityFeePerGas.toString(),
     maxFeePerGas: transaction.maxFeePerGas.toString(), gas: transaction.gas.toString(), value: transaction.value.toString(),
   } }));
-  await child.stdin.end(); const text = await new Response(child.stdout).text();
+  await child.stdin.end(); const parsed = await childJson(child.stdout);
   if (await child.exited !== 0) throw new Error("Isolated LKRP transaction signer failed");
-  const result = signedTransactionSchema.parse(JSON.parse(text));
+  const result = signedTransactionSchema.parse(parsed);
   if (result.address !== config.agent) throw new Error("Transaction signer address does not match the bound agent");
   return result.rawTransaction;
 };
@@ -129,7 +132,8 @@ const delegationPreviewSchema = z.object({ previewId: z.uuid(), previewHash: has
 const delegationSubmissionSchema = z.object({ transactionHash: hashSchema }).loose();
 
 const api = async (session: Session, path: string, init: RequestInit = {}): Promise<Response> => {
-  const headers = new Headers(init.headers); headers.set("authorization", `Bearer ${session.accessToken}`);
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${session.accessToken}`);
   return session.http.requestPlain(new URL(path, session.config.apiUrl), { ...init, headers });
 };
 const json = async (response: Response): Promise<unknown> => {
@@ -154,7 +158,10 @@ const ensureDelegation = async (session: Session, preview: Readonly<Record<strin
       expiresAt,
     }),
   })));
-  const ownerSignature = await signLedgerTypedData(context.owner, created.typedData);
+  const ownerSignature = await signLedgerTypedData(context.owner, created.typedData).then((signed) => {
+    lastClearSigning = signed.clearSigning;
+    return signed.signature;
+  });
   const submitted = delegationSubmissionSchema.parse(await json(await api(session, "/v1/delegations", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ previewId: created.previewId, previewHash: created.previewHash, ownerSignature }),
@@ -177,10 +184,10 @@ const ensureAgentBinding = async (session: Session): Promise<void> => {
 const loadOrProvisionAgent = async (): Promise<string> => {
   const configured = Bun.env["AQUA_AGENT_ADDRESS"];
   if (configured !== undefined) return configured;
-  try { return z.looseObject({ address: addressSchema }).parse(JSON.parse(await readFile(metadataPath, "utf8"))).address; }
+  try { return z.looseObject({ address: addressSchema }).parse(await readBoundedFileJson(metadataPath)).address; }
   catch {
     const provision = Bun.spawn([process.execPath, signerProgram, "provision"], { stdin: "inherit", stdout: "pipe", stderr: "inherit", env: Bun.env });
-    const result = z.looseObject({ address: addressSchema }).parse(JSON.parse(await new Response(provision.stdout).text()));
+    const result = z.looseObject({ address: addressSchema }).parse(await childJson(provision.stdout));
     if (await provision.exited !== 0) throw new Error("Ledger Key Ring agent provisioning failed");
     return result.address;
   }
@@ -188,12 +195,6 @@ const loadOrProvisionAgent = async (): Promise<string> => {
 
 const ensureSession = (): Promise<Session> => {
   sessionPromise ??= (async () => {
-    const bazanticEvidence = await discoverConfiguredAquaTools();
-    if (bazanticEvidence !== null) console.error(JSON.stringify({
-      level: "info", component: "aqua-mcp", message: "Bazantic Aqua tool catalog verified",
-      gatewaySlug: bazanticEvidence.gatewaySlug, mcpUrl: bazanticEvidence.mcpUrl,
-      fingerprints: bazanticEvidence.fingerprints,
-    }));
     const accessToken = await oauthAccessToken(apiUrl, oauthCachePath, oauthCallbackPort);
     const config = configurationSchema.parse({
       apiUrl, rpcUrl, agent: await loadOrProvisionAgent(), signerProgram, previewCachePath, oauthCachePath, oauthCallbackPort,
@@ -215,7 +216,7 @@ const ensureSession = (): Promise<Session> => {
 };
 
 const loadCache = async (session: Session): Promise<Record<string, Readonly<Record<string, unknown>>>> => {
-  try { return z.record(z.string(), z.record(z.string(), z.unknown())).parse(JSON.parse(await readFile(session.config.previewCachePath, "utf8"))); }
+  try { return z.record(z.string(), z.record(z.string(), z.unknown())).parse(await readBoundedFileJson(session.config.previewCachePath)); }
   catch { return {}; }
 };
 const savePreview = async (session: Session, body: Readonly<Record<string, unknown>>): Promise<void> => {
@@ -246,12 +247,16 @@ const postTrade = async (session: Session, arguments_: unknown) => {
     if (!error.success || error.data.type !== "urn:aqua:error:delegation-required") throw new Error(`Aqua API 409: ${jsonString(validationResult.body)}`);
     await ensureDelegation(session, preview); validation = await api(session, "/v1/trades", { method: "POST", headers, body });
   }
-  if (validation.status !== 402) return output(await json(validation));
+  if (validation.status !== 402) {
+    const submitted = z.record(z.string(), z.unknown()).parse(await json(validation));
+    return output(lastClearSigning === null ? submitted : { ...submitted, clearSigning: lastClearSigning });
+  }
   const prerequisiteTransactionHashes = await executePrerequisites(session, preview);
   headers.set("aqua-prerequisite-transactions", Buffer.from(JSON.stringify(prerequisiteTransactionHashes)).toString("base64url"));
   const network = `eip155:${chainIdSchema.parse(preview["chainId"])}` as const;
-  const response = await retryAquaPayment(session.http, validation, new URL("/v1/trades", session.config.apiUrl), { method: "POST", headers, body }, network);
-  return output(await json(response));
+  const response = await session.http.retryPayment(validation, new URL("/v1/trades", session.config.apiUrl), { method: "POST", headers, body }, network);
+  const submitted = z.record(z.string(), z.unknown()).parse(await json(response));
+  return output(lastClearSigning === null ? submitted : { ...submitted, clearSigning: lastClearSigning });
 };
 const getTrades = async (session: Session, arguments_: unknown) => {
   const parsed = tradesListQuerySchema.parse(arguments_);

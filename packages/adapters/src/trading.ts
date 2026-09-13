@@ -1,10 +1,12 @@
 import type { SQL } from "bun";
-import { calculateLimitAmounts, formatTokenAmount, parseTokenAmount, positiveAmountSchema } from "@aqua/core";
+import { decodeBase64urlJson } from "@aqua/core";
 import type { Address, AuthenticatedPrincipal, Hash, Hex, RpcPort, TradingOrder, TradingRequest } from "@aqua/core";
+import { calculateLimitAmounts, formatTokenAmount, parseTokenAmount, positiveAmountSchema } from "@aqua/core";
+import { z } from "zod";
 import type { ProtocolService } from "@aqua/contracts";
 import { decodeUint256, encodeBalanceOf } from "@aqua/evm";
 import type { BookPage, ChainCheckpoint, IndexedFill, IndexedOrder, OrderStatus, ProtocolGateway, ProtocolProjection, StoredIntent, TradingRepository } from "@aqua/orderbook";
-const decode=(v:string|undefined):{t:string;i:string}|null=>{if(v===undefined)return null;const x=JSON.parse(Buffer.from(v,"base64url").toString("utf8")) as unknown;if(typeof x!=="object"||x===null||!("t"in x)||!("i"in x)||typeof x.t!=="string"||typeof x.i!=="string")throw new Error("Invalid pagination cursor");return {t:x.t,i:x.i};}; const encode=(t:string,i:string)=>Buffer.from(JSON.stringify({t,i})).toString("base64url");
+const decode=(v:string|undefined):{t:string;i:string}|null=>{if(v===undefined)return null;const x=z.object({t:z.string(),i:z.string()}).strict().parse(decodeBase64urlJson(v));return {t:x.t,i:x.i};}; const encode=(t:string,i:string)=>Buffer.from(JSON.stringify({t,i})).toString("base64url");
 interface OrderRow{id:string;chain_id:string;maker:Address;router:Address;order_hash:Hash;encoded_order:Hex;base_token:Address;quote_token:Address;side:IndexedOrder["side"];price:string;original_base_amount:string;remaining_base_amount:string;original_base_units:string;remaining_base_units:string;base_decimals:number;quote_decimals:number;status:OrderStatus;block_number:string;created_at:Date;updated_at:Date}
 interface FillRow{id:string;order_id:string;transaction_hash:Hash;maker:Address;taker:Address;base_token:Address;quote_token:Address;base_amount:string;quote_amount:string;price:string;occurred_at:Date;block_number:string}
 const order=(r:OrderRow):IndexedOrder=>({id:r.id,chainId:r.chain_id,maker:r.maker,router:r.router,orderHash:r.order_hash,encodedOrder:r.encoded_order,baseToken:r.base_token,quoteToken:r.quote_token,side:r.side,price:r.price,originalBaseAmount:r.original_base_amount,remainingBaseAmount:r.remaining_base_amount,originalBaseUnits:r.original_base_units,remainingBaseUnits:r.remaining_base_units,baseDecimals:r.base_decimals,quoteDecimals:r.quote_decimals,status:r.status,blockNumber:r.block_number,createdAt:r.created_at.toISOString(),updatedAt:r.updated_at.toISOString()});

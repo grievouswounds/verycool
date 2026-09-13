@@ -3,7 +3,7 @@ import { HTTPFacilitatorClient } from "@x402/core/http";
 import { decodePaymentSignatureHeader } from "@x402/core/http";
 import type { PaymentRequired, SettleResponse } from "@x402/core/types";
 import {
-  addressSchema, AppError, hashSchema, hexSchema, parseStrictJson, parseTokenAmount, positiveAmountSchema, quantitySchema,
+  addressSchema, AppError, decodeBase64urlJson, hashSchema, hexSchema, parseStrictJson, parseTokenAmount, positiveAmountSchema, quantitySchema,
 } from "@aqua/core";
 import type {
   Address, AuthenticatedPrincipal, Hash, Hex, RpcCall, RpcPort, RuntimeManifest, SubscribedTradesWipe,
@@ -156,7 +156,7 @@ export class TradeApiService {
     const rows = await this.db<AgentChallengeRow[]>`SELECT owner,agent,message,expires_at,used_at FROM agent_binding_challenges WHERE id=${challengeId} FOR UPDATE`;
     const challenge = rows[0];
     if (challenge?.owner !== owner || challenge.agent !== agent || challenge.used_at !== null || challenge.expires_at <= new Date()) throw new AppError(409, "urn:aqua:error:agent-challenge", "Agent binding challenge is missing, expired, or already used");
-    const parsed = z.object({ message: z.object({ nonce: hashSchema, validBefore: z.string().regex(/^\d+$/u) }).loose() }).loose().parse(JSON.parse(challenge.message));
+    const parsed = z.object({ message: z.object({ nonce: hashSchema, validBefore: z.string().regex(/^\d+$/u) }).loose() }).loose().parse(parseStrictJson(challenge.message));
     const recovered = recoverAgentBindingAddress({ chainId: this.manifest.chain.id, verifyingContract: this.manifest.contracts.orderVaultFactory.address, owner, agent, nonce: parsed.message.nonce, validBefore: BigInt(parsed.message.validBefore) }, signature);
     if (recovered !== agent) throw new AppError(401, "urn:aqua:error:agent-proof", "Agent proof-of-possession signature is invalid");
     await this.db.begin(async (transaction) => {
@@ -515,7 +515,7 @@ export class TradeApiService {
 
   public async listTrades(query: TradesListQuery, owner: Address) {
     const cursorSchema = z.object({ at: z.iso.datetime({ offset: true }), id: z.string().min(1) }).strict();
-    const cursor = query.cursor === undefined ? null : cursorSchema.parse(JSON.parse(Buffer.from(query.cursor, "base64url").toString("utf8")));
+    const cursor = query.cursor === undefined ? null : cursorSchema.parse(decodeBase64urlJson(query.cursor));
     const ownRows = query.source !== "subscriptions" ? await this.db<OwnTradeRow[]>`SELECT o.id,o.state AS status,o.owner,o.agent,o.sell_token,o.buy_token,o.sell_amount::text,o.funded_amount::text,o.payment_transaction,o.lifecycle_transaction,p.request->'policy'->>'kind' AS kind,o.created_at AS occurred_at,o.updated_at FROM agent_order_operations o JOIN trade_previews p ON p.id=o.id WHERE o.owner=${owner} LIMIT 1000` : [];
     const subscribedRows = query.source !== "own" ? await this.db<SubscribedTradeRow[]>`SELECT id,watched_address,transaction_hash,sell_token,buy_token,sell_amount::text,buy_amount::text,occurred_at,updated_at FROM subscribed_trades WHERE owner=${owner} LIMIT 1000` : [];
     const own = ownRows.map((row) => ({ recordType: "aqua" as const, id: row.id, status: row.status, owner: row.owner, agent: row.agent, sellToken: row.sell_token, buyToken: row.buy_token, sellAmountUnits: row.sell_amount, fundedAmountUnits: row.funded_amount, paymentTransactionHash: row.payment_transaction, lifecycleTransactionHash: row.lifecycle_transaction, kind: row.kind, occurredAt: row.occurred_at.toISOString(), updatedAt: row.updated_at.toISOString() }));

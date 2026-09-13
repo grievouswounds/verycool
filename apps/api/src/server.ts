@@ -1,4 +1,4 @@
-import { activityListQuerySchema, activityWipeSchema, addressSchema, agentBindingRequestSchema, agentChallengeRequestSchema, AppError, challengeRequestSchema, delegationPreviewRequestSchema, delegationSubmitRequestSchema, hashSchema, parseStrictJson, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradeCancellationSubmitRequestSchema, tradePreviewRequestSchema, tradesListQuerySchema, tradeSubmitRequestSchema, tradingRequestSchema } from "@aqua/core";
+import { addressSchema, agentBindingRequestSchema, agentChallengeRequestSchema, AppError, challengeRequestSchema, decodeBase64urlJson, delegationPreviewRequestSchema, delegationSubmitRequestSchema, hashSchema, parseBoundedJsonRequest, parseStrictJson, sessionRequestSchema, subscribedTradesWipeSchema, subscriptionRequestSchema, tradeCancellationSubmitRequestSchema, tradePreviewRequestSchema, tradesListQuerySchema, tradeSubmitRequestSchema } from "@aqua/core";
 import type { AuthenticatedPrincipal, AuthenticationScope, Hash, RuntimeManifest } from "@aqua/core";
 import type { AuthService, LedgerWebAuthnService, OAuthService, AgentVault } from "@aqua/adapters";
 import { oauthMcpResource, oauthScopeOrDefault } from "@aqua/adapters";
@@ -7,10 +7,9 @@ import type { ActivityService } from "@aqua/activity";
 import type { TradingService } from "@aqua/orderbook";
 import type { TradeApiService } from "@aqua/trade-api";
 import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
-import { createQuoterRoutes } from "@aqua/quoter";
 import type { QuoterService } from "@aqua/quoter";
 import { z, ZodError } from "zod";
-import { docsHtml, gatewayOpenApiDocument, openApiDocument } from "./openapi.ts";
+import { docsHtml, openApiDocument } from "./openapi.ts";
 import { swaggerCssResponse, swaggerJavaScriptResponse } from "./swagger.ts";
 import { authorizePageHeaders, authorizePageHtml, htmxResponse, htmlFragment, oauthParameterNames, renderAppErrorFragment, renderSuccessFragment, renderWaitingFragment } from "./authorize.ts";
 import { MCP_OAUTH_CORS_PATHS, applyMcpCors, mcpCorsPreflight, mcpUnauthorized } from "./cors.ts";
@@ -61,43 +60,13 @@ const requestId = (request: Request): string => {
   return supplied !== null && requestIdLanguage.test(supplied) ? supplied : crypto.randomUUID();
 };
 
-const parseJson = async (request: Request): Promise<unknown> => {
-  const mediaType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-  if (mediaType !== "application/json") {
-    throw new AppError(415, "urn:aqua:error:content-type", "Content-Type must be application/json");
-  }
-  const contentLength = request.headers.get("content-length");
-  if (contentLength !== null && !/^(?:0|[1-9][0-9]{0,5})$/u.test(contentLength)) {
-    throw new AppError(400, "urn:aqua:error:content-length", "Content-Length is not canonical");
-  }
-  if (contentLength !== null && Number(contentLength) > 65_536) throw new AppError(413, "urn:aqua:error:body-size", "Request body exceeds 64 KiB");
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.length > 65_536) throw new AppError(413, "urn:aqua:error:body-size", "Request body exceeds 64 KiB");
-  let text: string;
-  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-  catch { throw new AppError(400, "urn:aqua:error:utf8", "Request body must be valid UTF-8"); }
-  try { return parseStrictJson(text); }
-  catch { throw new AppError(400, "urn:aqua:error:json", "Malformed JSON body"); }
-};
+const parseJson = (request: Request): Promise<unknown> => parseBoundedJsonRequest(request);
 
 const prerequisiteTransactions = (request: Request): readonly Hash[] => {
   const header = request.headers.get("aqua-prerequisite-transactions");
   if (header === null) return [];
-  try { return z.array(hashSchema).max(2).parse(JSON.parse(Buffer.from(header, "base64url").toString("utf8"))); }
+  try { return z.array(hashSchema).max(2).parse(decodeBase64urlJson(header)); }
   catch { throw new AppError(422, "urn:aqua:error:prerequisite-transactions", "Aqua-Prerequisite-Transactions must be a base64url JSON array of at most two transaction hashes"); }
-};
-
-const parseActivityQuery = (request: Request) => {
-  const allowed = new Set(["address", "classification", "from", "to", "cursor", "limit"]);
-  const parameters = new URL(request.url).searchParams;
-  const value: Record<string, string> = {};
-  for (const key of parameters.keys()) {
-    if (!allowed.has(key)) throw new AppError(422, "urn:aqua:error:query", `Unknown query parameter: ${key}`);
-    if (parameters.getAll(key).length !== 1) throw new AppError(422, "urn:aqua:error:query", `Duplicate query parameter: ${key}`);
-    const item = parameters.get(key);
-    if (item !== null) value[key] = item;
-  }
-  return activityListQuerySchema.parse(value);
 };
 
 const bearer = async (request: Request, auth: AuthService): Promise<AuthenticatedPrincipal> => {
@@ -105,13 +74,6 @@ const bearer = async (request: Request, auth: AuthService): Promise<Authenticate
   if (header?.startsWith("Bearer ") !== true) {
     throw new AppError(401, "urn:aqua:error:authentication", "Bearer access token is required");
   }
-  return auth.authenticate(header.slice(7));
-};
-
-const optionalBearer = async (request: Request, auth: AuthService): Promise<AuthenticatedPrincipal | null> => {
-  const header = request.headers.get("authorization");
-  if (header === null) return null;
-  if (!header.startsWith("Bearer ")) throw new AppError(401, "urn:aqua:error:authentication", "Authorization must use the Bearer scheme");
   return auth.authenticate(header.slice(7));
 };
 
@@ -136,14 +98,6 @@ const parseTradesQuery = (request: Request) => {
   return tradesListQuerySchema.parse(value);
 };
 
-const cookie = (request: Request, name: string): string | null => {
-  const values = request.headers.get("cookie")?.split(";") ?? [];
-  for (const item of values) {
-    const [key, ...rest] = item.trim().split("=");
-    if (key === name) return rest.join("=");
-  }
-  return null;
-};
 const registrationResponseSchema=z.custom<RegistrationResponseJSON>((value)=>typeof value==="object"&&value!==null);
 const authenticationResponseSchema=z.custom<AuthenticationResponseJSON>((value)=>typeof value==="object"&&value!==null);
 const webauthnFinishRegistrationSchema=z.object({id:z.uuid(),response:registrationResponseSchema}).strict();
@@ -206,11 +160,6 @@ const execute = async (request: Request, action: () => Promise<Response>, corsOr
 
 export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve.Options<undefined> => ({
   routes: {
-    ...createQuoterRoutes({quoter:dependencies.quoter,boundary:{
-      execute:(request,action)=>execute(request,action,dependencies.corsOrigin),
-      parseJson,
-      authenticate:async(request,scope)=>{const principal=await bearer(request,dependencies.auth);requireScope(principal,scope);return principal;},
-    }}),
     "/.well-known/oauth-protected-resource": (request) => applyMcpCors(Response.json({resource:dependencies.resource,authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}), request),
     "/.well-known/oauth-protected-resource/mcp": (request) => applyMcpCors(Response.json({resource:oauthMcpResource(dependencies.issuer),authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}), request),
     "/mcp/.well-known/oauth-protected-resource": (request) => applyMcpCors(Response.json({resource:oauthMcpResource(dependencies.issuer),authorization_servers:[dependencies.issuer],scopes_supported:["trading:read","trading:write","activity:read","activity:write"]}), request),
@@ -263,7 +212,6 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
       ? Response.json({ status: "ready" })
       : Response.json({ status: "not-ready" }, { status: 503 }),
     "/openapi.json": () => Response.json(openApiDocument),
-    "/openapi.gateway.json": () => Response.json(gatewayOpenApiDocument),
     "/docs": new Response(docsHtml, { headers: { "content-type": "text/html; charset=utf-8" } }),
     "/docs/swagger-ui.css": swaggerCssResponse,
     "/docs/swagger-ui.js": swaggerJavaScriptResponse,
@@ -290,28 +238,6 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
       }, null, 2);
       return new Response(body, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
     },
-    "/v1/capabilities": () => Response.json({
-      apiStyle: "agent-first",
-      amountLanguage: "canonical unsigned decimal string; no signs, exponent notation, separators, or leading zeroes",
-      tradingEndpoint: "POST /v1/trade-previews then POST /v1/trades",
-      mcpTransport: "hosted Streamable HTTP /mcp with OAuth; local stdio bridge aqua-ledger-key-ring remains available",
-      mcpTools: ["request_trade","post_trade","get_trades","cancel_trade","subscribe_to_user","unsubscribe_from_user","wipe_subscribed_trades"],
-      actions: ["createOrder", "amendOrder", "cancelOrders", "executeOrder", "prepareSwap", "batch", "query", "manageWrappedNative"],
-      orderKinds: ["market", "limit", "stopMarket", "stopLimit", "trailingStop", "takeProfitMarket", "takeProfitLimit", "oco", "bracket"],
-      timeInForce: ["gtc", "gtd", "ioc", "fok"],
-      fillPolicies: ["partial", "allOrNone"],
-      postPolicies: ["normal", "postOnly", "bookOrCancel"],
-      defaults: { marketTimeInForce: "ioc", slippageBps: "50", restingTimeInForce: "gtc", fillPolicy: "partial", postPolicy: "normal" },
-      authorizationProfile: "aqua-intent-v1 challenge/retry; not x402 payment",
-      chainSelection: "deployment-configured; chainId is never accepted in request bodies",
-      prices: { available: dependencies.quoter.pricesAvailable, provider: "1inch", endpoints: ["GET /v1/prices/address/:address", "GET /v1/prices/name/:name"] },
-      quoteEndpoint: "POST /v1/quotes/aqua",
-      erc20Monitoring: {
-        transport: "minute polling; no websocket", initialLookbackSeconds: 60,
-        classifications: ["buy", "sell", "sent", "received", "minted", "burned", "selfTransfer"],
-        buySellPolicy: "inferred only from opposite ERC-20 counterflows in the same transaction",
-      },
-    }),
     "/v1/auth/challenges": {
       POST: (request) => execute(request, async () => {
         const input = challengeRequestSchema.parse(await parseJson(request));
@@ -322,69 +248,12 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
     "/v1/auth/ledger/registration/verify": { POST:(request)=>execute(request,async()=>{const principal=await bearer(request,dependencies.auth);const input=webauthnFinishRegistrationSchema.parse(await parseJson(request));const result=await dependencies.webauthn.register(input.id,input.response);if(result.owner!==principal.address)throw new AppError(401,"urn:aqua:error:enrollment","SIWE owner does not match the Ledger credential");return Response.json(result,{status:201});},dependencies.corsOrigin) },
     "/v1/auth/ledger/authentication/options": { POST:(request)=>execute(request,async()=>{const input=webauthnStartAuthenticationSchema.parse(await parseJson(request));return Response.json(await dependencies.webauthn.authenticationOptions(input.address));},dependencies.corsOrigin) },
     "/v1/auth/ledger/authentication/verify": { POST:(request)=>execute(request,async()=>{const input=webauthnFinishAuthenticationSchema.parse(await parseJson(request));const result=await dependencies.webauthn.authenticate(input.id,input.response);return Response.json(await dependencies.auth.issueHardware(result.owner,input.clientId,["trading:read","trading:write","activity:read","activity:write"]));},dependencies.corsOrigin) },
-    "/v1/erc20-monitor/subscriptions": {
-      GET: (request) => execute(request, async () => {
-        const principal = await bearer(request, dependencies.auth);
-        requireScope(principal, "activity:read");
-        return Response.json({ subscriptions: await dependencies.activity.listSubscriptions(principal) });
-      }, dependencies.corsOrigin),
-      POST: (request) => execute(request, async () => {
-        const principal = await bearer(request, dependencies.auth);
-        requireScope(principal, "activity:write");
-        const input = subscriptionRequestSchema.parse(await parseJson(request));
-        return Response.json(await dependencies.activity.subscribe(input.address, principal));
-      }, dependencies.corsOrigin),
-    },
-    "/v1/erc20-monitor/subscriptions/:address": {
-      DELETE: (request) => execute(request, async () => {
-        const principal = await bearer(request, dependencies.auth);
-        requireScope(principal, "activity:write");
-        const address = addressSchema.parse(request.params["address"]);
-        return Response.json({ removed: await dependencies.activity.unsubscribe(address, principal) });
-      }, dependencies.corsOrigin),
-    },
-    "/v1/erc20-monitor/actions": {
-      GET: (request) => execute(request, async () => {
-        const principal = await bearer(request, dependencies.auth);
-        requireScope(principal, "activity:read");
-        return Response.json(await dependencies.activity.listActions(parseActivityQuery(request), principal));
-      }, dependencies.corsOrigin),
-    },
-    "/v1/erc20-monitor/actions/wipe": {
-      POST: (request) => execute(request, async () => {
-        const principal = await bearer(request, dependencies.auth);
-        requireScope(principal, "activity:write");
-        const input = activityWipeSchema.parse(await parseJson(request));
-        return Response.json({ deletedCount: (await dependencies.activity.wipe(input, principal)).toString(10) });
-      }, dependencies.corsOrigin),
-    },
     "/v1/auth/sessions": {
       POST: (request) => execute(request, async () => {
         const input = sessionRequestSchema.parse(await parseJson(request));
         const result = await dependencies.auth.session(input.challengeId, input.message, input.signature);
         const response = Response.json({ accessToken: result.accessToken, expiresIn: result.expiresIn });
         response.headers.append("set-cookie", `refresh_token=${result.refreshToken}; HttpOnly; Secure; SameSite=Strict; Path=/v1/auth; Max-Age=2592000`);
-        return response;
-      }, dependencies.corsOrigin),
-    },
-    "/v1/auth/refresh": {
-      POST: (request) => execute(request, async () => {
-        const refreshToken = cookie(request, "refresh_token");
-        if (refreshToken === null) throw new AppError(401, "urn:aqua:error:refresh", "Refresh cookie is required");
-        const result = await dependencies.auth.refresh(refreshToken);
-        const response = Response.json({ accessToken: result.accessToken, expiresIn: result.expiresIn });
-        response.headers.append("set-cookie", `refresh_token=${result.refreshToken}; HttpOnly; Secure; SameSite=Strict; Path=/v1/auth; Max-Age=2592000`);
-        return response;
-      }, dependencies.corsOrigin),
-    },
-    "/v1/trading": {
-      POST: (request) => execute(request, async () => {
-        const input = tradingRequestSchema.parse(await parseJson(request));
-        const result = await dependencies.trading.execute(
-          input, await optionalBearer(request, dependencies.auth), request.headers.get("aqua-authorization"),
-        );
-        const response = Response.json(result.body, { status: result.status });
-        if (result.headers !== undefined) for (const [name, value] of Object.entries(result.headers)) response.headers.set(name, value);
         return response;
       }, dependencies.corsOrigin),
     },
@@ -457,26 +326,16 @@ export const createServerOptions = (dependencies: ServerDependencies): Bun.Serve
   fetch(request) {
     const path = new URL(request.url).pathname;
     if (request.method === "OPTIONS" && MCP_OAUTH_CORS_PATHS.has(path)) return mcpCorsPreflight(request);
-    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-protected-resource/mcp","/mcp/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/authorize/htmx.js","/health/live", "/health/ready", "/openapi.json", "/openapi.gateway.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/setup", "/v1/capabilities", "/v1/trades", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions"]);
-    const postPaths = new Set(["/mcp","/register","/authorize/ceremony","/authorize/grant","/oauth/authorize/start","/oauth/authorize/complete","/token","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/refresh", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/agents/provision", "/v1/agents/me/challenges", "/v1/delegations/previews", "/v1/delegations", "/v1/trade-previews", "/v1/trades", "/v1/trade-subscriptions", "/v1/trade-subscriptions/trades/wipe", "/v1/trading", "/v1/quotes/aqua", "/v1/erc20-monitor/subscriptions", "/v1/erc20-monitor/actions/wipe"]);
+    const getPaths = new Set(["/.well-known/oauth-protected-resource","/.well-known/oauth-protected-resource/mcp","/mcp/.well-known/oauth-protected-resource","/.well-known/oauth-authorization-server","/authorize","/authorize/htmx.js","/health/live", "/health/ready", "/openapi.json", "/docs", "/docs/swagger-ui.css", "/docs/swagger-ui.js", "/setup", "/v1/trades"]);
+    const postPaths = new Set(["/mcp","/register","/authorize/ceremony","/authorize/grant","/oauth/authorize/start","/oauth/authorize/complete","/token","/v1/auth/challenges", "/v1/auth/sessions", "/v1/auth/ledger/registration/options","/v1/auth/ledger/registration/verify","/v1/auth/ledger/authentication/options","/v1/auth/ledger/authentication/verify", "/v1/agents/provision", "/v1/agents/me/challenges", "/v1/delegations/previews", "/v1/delegations", "/v1/trade-previews", "/v1/trades", "/v1/trade-subscriptions", "/v1/trade-subscriptions/trades/wipe"]);
     if (path === "/mcp") {
       const response = mcpUnauthorized(dependencies.issuer, request, null, 405);
       response.headers.set("allow", "POST, OPTIONS");
       return response;
     }
-    if (/^\/v1\/erc20-monitor\/subscriptions\/0x[0-9a-fA-F]{40}$/u.test(path)) {
-      const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
-      response.headers.set("allow", "DELETE");
-      return response;
-    }
     if (/^\/v1\/trade-subscriptions\/0x[0-9a-fA-F]{40}$/u.test(path) || path === "/v1/agents/me") {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
       response.headers.set("allow", path === "/v1/agents/me" ? "PUT" : "DELETE"); return response;
-    }
-    if (/^\/v1\/prices\/(?:address|name)\/[^/]+$/u.test(path)) {
-      const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));
-      response.headers.set("allow", "GET");
-      return response;
     }
     if (/^\/v1\/trades\/[0-9a-fA-F-]{36}\/cancellations$/u.test(path)) {
       const response = problem(405, "urn:aqua:error:method", "Method is not allowed for this route", requestId(request));

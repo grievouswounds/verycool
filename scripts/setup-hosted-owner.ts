@@ -71,7 +71,7 @@ for (const token of manifest.fixtures.tokens) {
       headers: { authorization: `Bearer ${hardware.accessToken}`, "content-type": "application/json" },
       body: JSON.stringify({ agent: provisioned.agent, token: token.address, maxPerOrder: "1", maxPerDay: "100", expiresAt }),
     }), "delegation preview"));
-  const ownerSignature = await signLedgerTypedData(enrolled.owner, preview.typedData);
+  const ownerSignature = (await signLedgerTypedData(enrolled.owner, preview.typedData)).signature;
   const submitted = z.object({ transactionHash: hexSchema }).loose()
     .parse(await json(await fetch(new URL("/v1/delegations", apiUrl), {
       method: "POST",

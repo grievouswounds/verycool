@@ -12,6 +12,12 @@
       "sourceType": "github",
       "skillPath": "skills/neon-postgres/SKILL.md",
       "computedHash": "64150370145c18f563fbc652c8d8bf273c4943d2a9f2039ddd51af9fd08d96f3"
+    },
+    "aqua-trading": {
+      "source": ".",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/aqua-trading/SKILL.md",
+      "computedHash": "445bdc30a320ec62c2d7a357b967295e049baec1f6770989462266452e91f3e6"
     }
   }
 }

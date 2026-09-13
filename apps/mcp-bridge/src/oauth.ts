@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { MAX_HTTP_BODY_BYTES, readBoundedFileJson, readBoundedJson } from "@aqua/core";
 import { z } from "zod";
 
 const tokenSchema = z.object({
@@ -14,7 +15,7 @@ const stateSchema = z.object({
 type OAuthState = z.infer<typeof stateSchema>;
 
 const json = async (response: Response): Promise<unknown> => {
-  const body: unknown = await response.json();
+  const body: unknown = await readBoundedJson(response, MAX_HTTP_BODY_BYTES);
   if (!response.ok) throw new Error(`OAuth ${String(response.status)}: ${JSON.stringify(body)}`);
   return body;
 };
@@ -23,7 +24,7 @@ const save = async (path: string, state: OAuthState): Promise<void> => {
   await writeFile(path, JSON.stringify(state), { mode: 0o600 });
 };
 const load = async (path: string): Promise<OAuthState | null> => {
-  try { return stateSchema.parse(JSON.parse(await readFile(path, "utf8"))); } catch { return null; }
+  try { return stateSchema.parse(await readBoundedFileJson(path)); } catch { return null; }
 };
 const tokenRequest = async (apiUrl: string, values: Readonly<Record<string, string>>): Promise<z.infer<typeof tokenSchema>> => {
   const response = await fetch(new URL("/token", apiUrl), {

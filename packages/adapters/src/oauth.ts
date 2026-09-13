@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { SQL } from "bun";
-import { AppError, AUTHENTICATION_SCOPES, addressSchema } from "@aqua/core";
+import { AppError, AUTHENTICATION_SCOPES, addressSchema, parseStrictJson } from "@aqua/core";
 import type { Address, AuthenticationScope } from "@aqua/core";
 import { z } from "zod";
 
@@ -51,7 +51,7 @@ export const authorizationRedirectWithIss=(redirectUri:string,code:string,state:
 const rows=<T>(value:T|T[]):T[]=>Array.isArray(value)?value:[value];
 const jsonArray=(value:unknown):unknown[]=>{
   if(Array.isArray(value))return value;
-  if(typeof value==="string"){const parsed:unknown=JSON.parse(value);if(Array.isArray(parsed))return parsed;}
+  if(typeof value==="string"){const parsed:unknown=parseStrictJson(value);if(Array.isArray(parsed))return parsed;}
   throw new AppError(500,"urn:aqua:error:internal","OAuth JSON array column is malformed");
 };
 const jsonScopes=(value:unknown):AuthenticationScope[]=>jsonArray(value).map((scope)=>scopeSchema.parse(scope));

@@ -2,7 +2,7 @@ import { x402Facilitator } from "@x402/core/facilitator";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { ExactEvmScheme } from "@x402/evm/exact/facilitator";
 import type { FacilitatorEvmSigner } from "@x402/evm";
-import { addressSchema, hashSchema, hexSchema, loadRuntimeManifest, localProfileDefaults } from "@aqua/core";
+import { addressSchema, hashSchema, hexSchema, loadRuntimeManifest, localProfileDefaults, parseBoundedJsonRequest } from "@aqua/core";
 import type { Hex, RuntimeManifest } from "@aqua/core";
 import {
   concatHex, decodeAddress, decodeUint256, encodeAllowance, encodeBalanceOf, encodeIsValidSignature,
@@ -117,7 +117,7 @@ export const createFacilitatorRoutes = async (
   const network = `eip155:${String(manifest.chain.id)}` as const;
   const facilitator = new x402Facilitator().register(network, new ExactEvmScheme(signer, { simulateInSettle: true }));
 const parsedRequest = async (request: Request): Promise<{ readonly paymentPayload: PaymentPayload; readonly paymentRequirements: PaymentRequirements }> => {
-    const parsed = requestSchema.parse(await request.json());
+    const parsed = requestSchema.parse(await parseBoundedJsonRequest(request));
     return { paymentPayload: parsed.paymentPayload, paymentRequirements: parsed.paymentRequirements };
   };
   const routes = {

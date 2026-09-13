@@ -1,15 +1,16 @@
 /* eslint-disable @typescript-eslint/no-deprecated -- hosted /mcp shares Server with the stdio bridge on SDK 1.29 */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { AppError, addressSchema, hashSchema, hexSchema, quantitySchema, subscribedTradesWipeSchema, tradePreviewRequestSchema, tradesListQuerySchema } from "@aqua/core";
+import { CallToolRequestSchema, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { AppError, addressSchema, hashSchema, hexSchema, parseBoundedJsonRequest, quantitySchema, subscribedTradesWipeSchema, tradePreviewRequestSchema, tradesListQuerySchema } from "@aqua/core";
 import type { Address, AuthenticatedPrincipal, Hash, Hex, RpcPort } from "@aqua/core";
 import type { AgentVault, AuthService } from "@aqua/adapters";
 import type { ActivityService } from "@aqua/activity";
-import { LedgerX402PaymentHeaders } from "@aqua/bazantic";
+import { LedgerX402PaymentHeaders } from "@aqua/x402-client";
 import { hexToQuantity } from "@aqua/evm";
 import type { Eip712TypedData } from "@aqua/evm";
 import type { TradeApiService } from "@aqua/trade-api";
+import { JSONRPC_PAYMENT_REQUIRED_CODE } from "@aqua/x402-adapter";
 import { z } from "zod";
 import { applyMcpCors, mcpUnauthorized } from "./cors.ts";
 
@@ -124,10 +125,14 @@ const callTool = async (dependencies: HostedMcpDependencies, principal: Authenti
       const input = { previewId, previewHash, lifecycleSignature, ...(additionalLifecycleSignatures.length === 0 ? {} : { additionalLifecycleSignatures }) };
       let result = await dependencies.tradeApi.submit(input, principal, null, hashes);
       if (result.status === 402 && result.paymentRequired !== undefined) {
+        const bound = await dependencies.agentVault.peekAgent(owner);
+        if (bound === null) {
+          throw new McpError(JSONRPC_PAYMENT_REQUIRED_CODE, "Payment is required before trade activation", result.paymentRequired);
+        }
         const headers = await new LedgerX402PaymentHeaders({
           address: z.custom<`0x${string}`>((value) => typeof value === "string" && /^0x[0-9a-fA-F]{40}$/u.test(value)).parse(agent),
           signTypedData: (request) => dependencies.agentVault.signPermit2(owner, typedDataSchema.parse(request)).then((signature) => z.custom<`0x${string}`>((value) => typeof value === "string" && /^0x[0-9a-fA-F]{130}$/u.test(value)).parse(signature)),
-        }).create(result.paymentRequired, { kind: "aqua", network: `eip155:${String(preview["chainId"])}` });
+        }).create(result.paymentRequired, `eip155:${String(preview["chainId"])}`);
         const payment = headers["payment-signature"] ?? headers["PAYMENT-SIGNATURE"] ?? null;
         result = await dependencies.tradeApi.submit(input, principal, payment, hashes);
       }
@@ -177,8 +182,11 @@ export const handleHostedMcp = async (request: Request, dependencies: HostedMcpD
     return mcpUnauthorized(dependencies.origin, request, null, 405);
   }
   let body: unknown;
-  try { body = await request.json(); }
-  catch { body = null; }
+  try { body = await parseBoundedJsonRequest(request); }
+  catch (error: unknown) {
+    if (error instanceof AppError) throw error;
+    body = null;
+  }
   let principal: AuthenticatedPrincipal;
   try { principal = await authenticateMcp(request, dependencies.auth); }
   catch (error: unknown) {

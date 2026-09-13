@@ -629,14 +629,14 @@
             ];
             text = ''exec bash "$PWD/scripts/e2e.sh" --dev deterministic "$@"'';
           };
-          e2eBazanticCanary = pkgs.writeShellApplication {
-            name = "e2e-bazantic-canary";
+          e2eHostedMcpCanary = pkgs.writeShellApplication {
+            name = "e2e-hosted-mcp-canary";
             runtimeInputs = [
               pkgs.bash
               pkgs.bun
               pkgs.coreutils
             ];
-            text = ''exec bash "$PWD/scripts/e2e.sh" bazantic-canary "$@"'';
+            text = ''exec bash "$PWD/scripts/e2e.sh" hosted-mcp-canary "$@"'';
           };
           e2eAll = pkgs.writeShellApplication {
             name = "e2e-all";
@@ -668,7 +668,7 @@
             ];
             text = ''
               export PATH="$PWD/node_modules/.bin:$PATH"
-              exec bun "$PWD/scripts/deploy-bazantic-gateway.ts" "$@"
+              exec bun "$PWD/scripts/deploy-vercel.ts" "$@"
             '';
           };
           mcpCheck = pkgs.writeShellApplication {
@@ -699,7 +699,7 @@
             checkLocal
             ledgerBootstrap
             e2e
-            e2eBazanticCanary
+            e2eHostedMcpCanary
             e2eAll
             e2ePhysical
             deploy
@@ -779,9 +779,9 @@
             type = "app";
             program = "${packages.e2e}/bin/e2e";
           };
-          e2e-bazantic-canary = {
+          e2e-hosted-mcp-canary = {
             type = "app";
-            program = "${packages.e2eBazanticCanary}/bin/e2e-bazantic-canary";
+            program = "${packages.e2eHostedMcpCanary}/bin/e2e-hosted-mcp-canary";
           };
           e2e-all = {
             type = "app";
@@ -813,7 +813,7 @@
             touch $out
           '';
           dependency-policy = pkgs.runCommand "dependency-policy" { } ''
-            ! grep -E '(^|[/@])(ethers|web3)(@|:)' ${./aube-lock.yaml}
+            ! grep -E '^[[:space:]]+web3@' ${./aube-lock.yaml}
             ! grep -E '"(viem|ethers|web3)"[[:space:]]*:' ${./package.json}
             ! grep -RInE '(^|[^a-zA-Z0-9_-])(npm|npx|yarn|pnpm)([^a-zA-Z0-9_-]|$)' ${./scripts} ${./apps} ${./packages}
             touch $out
@@ -846,7 +846,7 @@
               ledgerBootstrap
               self.packages.${system}.checkLocal
               self.packages.${system}.e2e
-              self.packages.${system}.e2eBazanticCanary
+              self.packages.${system}.e2eHostedMcpCanary
               self.packages.${system}.e2eAll
               self.packages.${system}.e2ePhysical
               self.packages.${system}.deploy

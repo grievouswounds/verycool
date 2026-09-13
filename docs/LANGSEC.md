@@ -9,7 +9,10 @@ Every untrusted interface is treated as a language recognizer. Parsing happens o
 - Declared lengths have a bounded canonical decimal grammar. Invalid UTF-8 is rejected using a fatal decoder.
 - JSON is recognized with duplicate-key rejection, prototype-sensitive-key rejection, and lossless-number safety before strict Zod object grammars. Unknown properties and ambiguous unions are rejected.
 - Decimal token amounts accept only `0|[1-9][0-9]*` with an optional dot and digits. Signs, whitespace, separators, hexadecimal and exponent notation are outside the language.
-- Trading is one top-level discriminated union and every nested choice is another closed union. Order kinds, GTD lifetime forms, cancellation scopes, batch operations, query resources, size denominations, trails, and bracket entries have no precedence or fallback productions.
+- Trading command unions live in `tradingRequestSchema` as the in-process type source. They are no longer a network-facing HTTP language.
+- `decodeBase64urlJson` is the single recognizer for base64url JSON envelopes (cursors, `aqua-prerequisite-transactions`). Canonical alphabet, no padding, bounded decoded length, then `parseStrictJson`.
+- HTTP responses and subprocess/file/device JSON use `readBoundedText` / `readBoundedJson` / `readBoundedFileJson` with a 1 MiB cap (64 KiB for HTTP request bodies).
+- MCP POST `/mcp` uses the same bounded request recognizer as other JSON routes. Unpaid hosted `post_trade` without a delegated vault returns JSON-RPC `-32042` with a `PaymentRequired` payload.
 - Trading decimals are at most 160 characters; page limits, book depth, cursors, arrays, cancellation sets, and batches have independent hard bounds. Decimal-to-atomic conversion rejects token precision overflow before any protocol call.
 - Hex bytes, addresses, hashes, UUIDs, timestamps, enums and bounded integers each have one explicit recognizer.
 - The configured chain is not part of the body language, preventing cross-chain interpretation.
@@ -20,7 +23,7 @@ Every untrusted interface is treated as a language recognizer. Parsing happens o
 ## EVM and RPC languages
 
 - Only explicitly implemented EIP-1474 methods can be emitted. Callers cannot supply method names or arbitrary parameter shapes.
-- Responses are limited to 1 MiB, decoded as strict UTF-8, parsed once, and recognized as an exact success or failure envelope with a matching monotonic ID.
+- Responses are limited to 1 MiB, decoded as strict UTF-8, parsed once with `parseStrictJson`, and recognized as an exact success or failure envelope with a matching monotonic ID.
 - Byte strings and RPC quantities have separate grammars. Quantities reject leading zeroes.
 - Contract return values are decoded through exact Cubane ABI types before they enter the domain.
 - SwapVM programs are parsed as length-delimited instructions and checked against router-specific opcode allowlists.

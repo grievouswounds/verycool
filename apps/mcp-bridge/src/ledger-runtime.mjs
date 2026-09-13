@@ -1,4 +1,6 @@
+import { spawn } from "node:child_process";
 import "./json-bigint.mjs";
+import { ContextModuleBuilder, ContextModuleChainID } from "@ledgerhq/context-module";
 import { DeviceActionStatus, DeviceManagementKitBuilder, DeviceModelId, UserInteractionRequired } from "@ledgerhq/device-management-kit";
 import { SignerEthBuilder } from "@ledgerhq/device-signer-kit-ethereum";
 import { nodeHidTransportFactory } from "@ledgerhq/device-transport-kit-node-hid";
@@ -29,6 +31,42 @@ const runAction = async (action) => {
   if (state.status === DeviceActionStatus.Stopped) throw new Error("Ledger operation was cancelled");
   return state.output;
 };
+const calModeOf = () => process.env.AQUA_LEDGER_CAL_MODE === "test" ? "test" : "prod";
+const calBranchOf = () => {
+  const branch = process.env.AQUA_LEDGER_CAL_BRANCH;
+  return branch === "next" || branch === "demo" ? branch : "main";
+};
+const createSigner = (dmk, sessionId, onReport) => {
+  const originToken = process.env.AQUA_LEDGER_ORIGIN_TOKEN ?? "";
+  if (originToken.length === 0) return new SignerEthBuilder({ dmk, sessionId }).build();
+  const contextModule = new ContextModuleBuilder({ originToken })
+    .setChain(ContextModuleChainID.Ethereum)
+    .setAppSource("aqua-mcp")
+    .setCalConfig({ url: "https://global.api.prd.ledger.com/cal/v1", mode: calModeOf(), branch: calBranchOf() })
+    .setBlindSigningReporter({
+      report: (params) => {
+        onReport(params);
+        return Promise.resolve({ _tag: "Right", right: undefined });
+      },
+    })
+    .build();
+  return new SignerEthBuilder({ dmk, sessionId, originToken }).withContextModule(contextModule).build();
+};
+const assertGenuine = async () => {
+  if (process.env.AQUA_E2E === "1") return;
+  const walletCli = process.env.AQUA_WALLET_CLI ?? "wallet-cli";
+  await new Promise((resolve, reject) => {
+    const child = spawn(walletCli, ["genuine-check", "--output", "json"], { stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    child.stderr.on("data", (chunk) => { chunks.push(String(chunk)); });
+    child.stdout.on("data", (chunk) => { chunks.push(String(chunk)); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(undefined);
+      else reject(new Error(`Ledger genuine check failed: ${chunks.join("").trim()}`));
+    });
+  });
+};
 const withLedger = async (operation) => {
   const requestedTransport = process.env.AQUA_LEDGER_TRANSPORT ?? "node-hid";
   if (requestedTransport !== "node-hid" && requestedTransport !== "speculos") throw new Error("AQUA_LEDGER_TRANSPORT must be node-hid or speculos");
@@ -48,9 +86,11 @@ const withLedger = async (operation) => {
   const speculosUrl = process.env.AQUA_SPECULOS_URL ?? "http://127.0.0.1:5000";
   const masher = requestedTransport === "speculos" ? mashSpeculos(speculosUrl, stop.signal) : Promise.resolve();
   try {
-    const signer = new SignerEthBuilder({ dmk, sessionId }).build();
+    await assertGenuine();
+    let verdict = null;
+    const signer = createSigner(dmk, sessionId, (params) => { verdict = params; });
     const { address } = await runAction(signer.getAddress(derivationPath, { checkOnDevice: false }));
-    return await operation(signer, address);
+    return await operation(signer, address, () => verdict);
   } finally { stop.abort(); await masher; await dmk.disconnect({ sessionId }); await dmk.close(); }
 };
 export const ledgerAddress = () => withLedger((_signer, owner) => owner);
@@ -104,9 +144,10 @@ const mashSpeculos = async (url, signal) => {
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
 };
-export const ledgerSignTypedData = (typedData) => withLedger(async (signer, owner) => {
+export const ledgerSignTypedData = (typedData) => withLedger(async (signer, owner, verdictOf) => {
   try {
-    return { owner, signature: await runAction(signer.signTypedData(derivationPath, asTypedData(typedData))) };
+    const signature = await runAction(signer.signTypedData(derivationPath, asTypedData(typedData)));
+    return { owner, signature, clearSigning: verdictOf() };
   } catch (error) {
     if (requestedTransportOf() === "speculos") {
       const url = process.env.AQUA_SPECULOS_URL ?? "http://127.0.0.1:5000";

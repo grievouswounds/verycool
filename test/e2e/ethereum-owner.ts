@@ -31,7 +31,7 @@ const typedData: Eip712TypedData = {
     maxPerOrder: "100", maxPerDay: "200", validUntil: "9999999999", nonce: "0",
   },
 };
-const typedSignature = await signLedgerTypedData(owner, typedData);
+const typedSignature = (await signLedgerTypedData(owner, typedData)).signature;
 const typedRecovered = recoverTypedDataAddress(typedData, typedSignature);
 if (typedRecovered.toLowerCase() !== owner.toLowerCase()) throw new Error("Ledger EIP-712 signature recovered to the wrong owner");
 await mkdir(dirname(output), { recursive: true });

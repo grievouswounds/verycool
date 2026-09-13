@@ -22,9 +22,9 @@ fi
 physical=0
 if [[ "$mode" == physical ]]; then physical=1; fi
 
-if [[ "$mode" == bazantic-canary ]]; then
-  export AQUA_E2E_REPORT="${AQUA_E2E_REPORT:-$root/reports/e2e/bazantic-canary.json}"
-  exec bun "$root/test/e2e/bazantic-canary.ts" "$@"
+if [[ "$mode" == hosted-mcp-canary ]]; then
+  export AQUA_E2E_REPORT="${AQUA_E2E_REPORT:-$root/reports/e2e/hosted-mcp-canary.json}"
+  exec bun "$root/test/e2e/hosted-mcp-canary.ts" "$@"
 fi
 
 if [[ "$physical" == 1 ]]; then
@@ -37,7 +37,7 @@ elif [[ "$(uname -s)" == Darwin && "${AQUA_E2E_INNER:-0}" != 1 ]]; then
   gid="$(id -g)"
   docker build -t aqua-speculos-e2e --build-arg "UID=$uid" --build-arg "GID=$gid" -f "$root/Dockerfile" "$root"
   exec docker run --rm --platform linux/arm64 --privileged -e AQUA_E2E_INNER=1 \
-    -e AQUA_BAZANTIC_GATEWAY_SLUG="${AQUA_BAZANTIC_GATEWAY_SLUG:-}" \
+    -e AQUA_PUBLIC_ORIGIN="${AQUA_PUBLIC_ORIGIN:-}" \
     -e "AQUA_UID=$uid" -e "AQUA_GID=$gid" \
     -v aqua-speculos-nix-store:/nix \
     -v aqua-speculos-aube-cache:/home/aqua/.cache/aube \
@@ -279,19 +279,14 @@ curl -fsS "http://127.0.0.1:$AQUA_FACILITATOR_PORT/health/live" >/dev/null
 export AQUA_LEDGER_OWNER_EVIDENCE="$root/reports/e2e/ethereum-owner.json"
 export AQUA_E2E_OAUTH_DRIVER="$root/test/e2e/oauth-fido2-driver.ts"
 
-# Local HTTPS Bazantic protocol fixture: catalog get_gateway followed by the
-# catalog-issued gateway tools/list. The fixture exposes no paid operation.
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 \
-  -addext "subjectAltName=IP:127.0.0.1" -keyout "$work/bazantic.key" -out "$work/bazantic.crt" >/dev/null 2>&1
-export AQUA_BAZANTIC_FIXTURE_KEY="$work/bazantic.key"
-export AQUA_BAZANTIC_FIXTURE_CERT="$work/bazantic.crt"
-export AQUA_BAZANTIC_FIXTURE_READY="$work/bazantic.ready"
-export AQUA_BAZANTIC_FIXTURE_PORT=19443
-bun "$root/test/e2e/bazantic-fixture.ts" >"$work/bazantic.log" 2>&1 & processes+=("$!")
-for _ in $(seq 1 60); do [[ -f "$work/bazantic.ready" ]] && break; sleep 0.1; done
-export NODE_EXTRA_CA_CERTS="$work/bazantic.crt"
-export AQUA_BAZANTIC_GATEWAY_SLUG=aqua-local-e2e
-export AQUA_BAZANTIC_CATALOG_URL=https://127.0.0.1:19443/catalog
+# Local x402 MCP payment fixture: unpaid tools/call emits -32042, retry settles.
+export AQUA_X402_FIXTURE_READY="$work/x402-mcp.ready"
+export AQUA_X402_FIXTURE_PORT=19443
+bun "$root/test/e2e/x402-mcp-fixture.ts" >"$work/x402-mcp.log" 2>&1 & processes+=("$!")
+for _ in $(seq 1 60); do [[ -f "$work/x402-mcp.ready" ]] && break; sleep 0.1; done
+bun "$root/test/e2e/x402-mcp-probe.ts"
+curl -fsS http://127.0.0.1:19443/evidence >"$root/reports/e2e/x402-mcp-local.json"
+jq -e '.challenges >= 1 and .settlements >= 1' "$root/reports/e2e/x402-mcp-local.json" >/dev/null
 export AQUA_API_URL="http://localhost:$AQUA_API_PORT"
 export AQUA_RPC_URL="$AQUA_LOCAL_RPC_URL"
 export AQUA_AGENT_ADDRESS="$(jq -r .agent "$AQUA_STATE_DIR/identity.json")"
@@ -326,11 +321,9 @@ if ! AQUA_E2E_REPORT="$root/reports/e2e/mcp.json" bun "$root/test/e2e/mcp-full-f
 fi
 AQUA_E2E_REPORT="$root/reports/e2e/trades.json" AQUA_MCP_REPORT="$root/reports/e2e/mcp.json" \
   bun "$root/test/e2e/trade-evidence.ts"
-curl --cacert "$work/bazantic.crt" -fsS https://127.0.0.1:19443/evidence >"$root/reports/e2e/bazantic-local.json"
-jq -e '.catalogRequests >= 1 and .listRequests >= 1 and .paidRequests == 0' "$root/reports/e2e/bazantic-local.json" >/dev/null
 
 if [[ "$mode" == all ]]; then
-  AQUA_E2E_REPORT="$root/reports/e2e/bazantic-canary.json" bun "$root/test/e2e/bazantic-canary.ts"
+  AQUA_E2E_REPORT="$root/reports/e2e/hosted-mcp-canary.json" bun "$root/test/e2e/hosted-mcp-canary.ts"
 fi
 
 if [[ "$physical" == 1 ]]; then
@@ -352,7 +345,7 @@ jq -n --slurpfile revisions "${AQUA_LEDGER_E2E_ASSETS:-$work}/revisions.json" \
   --slurpfile agent "$root/reports/e2e/agent.json" \
   --slurpfile mcp "$root/reports/e2e/mcp.json" \
   --slurpfile trades "$root/reports/e2e/trades.json" \
-  --slurpfile bazantic "$root/reports/e2e/bazantic-local.json" \
-  '{schemaVersion:1,createdAt:(now|todate),ledgerRevisions:$revisions[0],chain:$chain[0],keyRing:$keyRing[0],agent:$agent[0],fido2:$ctap[0],mcp:$mcp[0],trades:$trades[0],bazantic:$bazantic[0],services:{postgresql:true,api:true,facilitator:true,activityWorker:true,orderWorker:true,secretBroker:true},speculos:{ledgerSync:$sync[0],ethereum:$eth[0],securityKey:$fido[0]},limitations:["Speculos validates application protocol behavior, not physical USB, Secure Element, firmware, or hardware security equivalence."]}' \
+  --slurpfile x402 "$root/reports/e2e/x402-mcp-local.json" \
+  '{schemaVersion:1,createdAt:(now|todate),ledgerRevisions:$revisions[0],chain:$chain[0],keyRing:$keyRing[0],agent:$agent[0],fido2:$ctap[0],mcp:$mcp[0],trades:$trades[0],x402Mcp:$x402[0],services:{postgresql:true,api:true,facilitator:true,activityWorker:true,orderWorker:true,secretBroker:true},speculos:{ledgerSync:$sync[0],ethereum:$eth[0],securityKey:$fido[0]},limitations:["Speculos validates application protocol behavior, not physical USB, Secure Element, firmware, or hardware security equivalence."]}' \
   >"$root/reports/e2e/full.json"
 echo "E2E evidence written to reports/e2e/full.json"

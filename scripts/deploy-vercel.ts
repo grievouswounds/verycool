@@ -6,7 +6,6 @@ import { parseAgentKek } from "@aqua/adapters";
 import { z } from "zod";
 import { applyLedgerMode, parseLedgerArgv } from "./ledger-mode.ts";
 
-export const GATEWAY_NAME = "Aqua transaction preparation API";
 export const PINNED_PUBLIC_ORIGIN = "https://vercel-henna-gamma-46.vercel.app";
 export const VERCEL_STAGING_DIR = "out/vercel";
 export const HOSTED_VERCEL_CONFIG = {
@@ -16,17 +15,6 @@ export const HOSTED_VERCEL_CONFIG = {
   functions: { "src/server.js": { maxDuration: 300 } },
 } as const;
 
-const whoamiSchema = z.object({
-  ok: z.boolean(),
-  signedIn: z.boolean(),
-  scopes: z.array(z.string()),
-}).loose();
-const gatewayAddSchema = z.object({
-  ok: z.literal(true),
-  id: z.string().min(1),
-  slug: z.string().min(1),
-  mcpUrl: z.url(),
-}).loose();
 const openApiSchema = z.object({
   openapi: z.string().min(1),
   paths: z.record(z.string(), z.unknown()),
@@ -128,12 +116,6 @@ const runCaptured = async (command: string, args: readonly string[], options: { 
   return { stdout, stderr, exitCode: await child.exited };
 };
 
-const runJson = async (command: string, args: readonly string[]): Promise<unknown> => {
-  const result = await runCaptured(command, args);
-  if (result.exitCode !== 0) throw new Error(`${command} ${args.join(" ")} failed:\n${result.stderr}\n${result.stdout}`);
-  return z.unknown().parse(JSON.parse(result.stdout));
-};
-
 const vercelCli = (): readonly [string, ...string[]] => {
   const resolved = Bun.which("vercel");
   if (resolved !== null) return [resolved];
@@ -216,11 +198,6 @@ const deploy = async (): Promise<void> => {
   if (Bun.which("vercel") === null) {
     console.error("vercel CLI is not on PATH; using bunx vercel@latest. Install it with `npm i -g vercel` to skip the download and interactive prompts.");
   }
-  requireCommand("baz", "Install @bazantic/cli and run `baz login` with gateway:read and gateway:write.");
-  console.error("checking baz session");
-  const whoami = whoamiSchema.parse(await runJson("baz", ["whoami", "--json"]));
-  if (!whoami.ok || !whoami.signedIn) fail("baz is not signed in. Run `baz login`.");
-  if (!whoami.scopes.includes("gateway:write")) fail("this baz session lacks gateway:write; run `baz login` again.");
 
   console.error("migrating database");
   const migrate = await runCaptured(requireCommand("bun", "Install Bun to run migrations."), ["scripts/migrate.ts"]);
@@ -258,50 +235,14 @@ const deploy = async (): Promise<void> => {
 
   console.error(`waiting for ${origin} /health/live`);
   await waitForPublicOrigin(origin);
-  const authType = Bun.env["AQUA_BAZANTIC_AUTH_TYPE"]?.trim() === "api-key" ? "api-key" : "x402-mpp";
-  const created = gatewayAddSchema.parse(await runJson("baz", [
-    "gateway", "add",
-    "--spec-url", `${origin}/openapi.gateway.json`,
-    "--endpoint", origin,
-    "--name", GATEWAY_NAME,
-    "--auth-type", authType,
-    "--status", "draft",
-    "--json",
-  ]));
-  const record = {
-    id: created.id,
-    slug: created.slug,
-    mcpUrl: created.mcpUrl,
-    origin,
-    name: GATEWAY_NAME,
-    dashboard: "https://bazantic.com",
-    mcpJam: {
-      http: { transport: "streamable-http", url: `${origin}/mcp` },
-      stdio: {
-        command: "bun",
-        args: ["apps/mcp-bridge/src/main.ts"],
-        env: {
-          AQUA_API_URL: origin,
-          AQUA_RPC_URL: envOr("AQUA_RPC_URL", manifest.chain.rpcUrl),
-          XDG_STATE_HOME: `${stateDir}/aqua-mcp-state`,
-        },
-      },
-    },
-    createdAt: new Date().toISOString(),
-  };
-  await Bun.write(`${stateDir}/bazantic-gateway.json`, `${JSON.stringify(record, null, 2)}\n`);
   console.log(JSON.stringify({
     ok: true,
-    id: created.id,
-    slug: created.slug,
-    mcpUrl: created.mcpUrl,
     origin,
-    mcpJamUrl: `${origin}/mcp`,
+    mcpUrl: `${origin}/mcp`,
+    mcpJam: "stdio aqua-ledger-key-ring",
     next: [
-      "Open the Bazantic dashboard, set prices, and activate the trimmed gateway spec.",
-      `MCP Jam HTTP: add ${origin}/mcp as Streamable HTTP (OAuth). Do not use a unique *.vercel.app URL.`,
-      "MCP Jam STDIO: bun apps/mcp-bridge/src/main.ts with AQUA_API_URL pointing at the pinned origin.",
-      "Delete probe gateway 7cjtotejxfb63n74uqsrqx2xmi from the Bazantic dashboard.",
+      "MCP Jam: add one stdio server bun apps/mcp-bridge/src/main.ts --prod with AQUA_API_URL, AQUA_RPC_URL, and XDG_STATE_HOME.",
+      "Hosted origin /mcp remains for mcp-check hosted / OAuth conformance, not Jam.",
     ],
   }, null, 2));
 };

@@ -25,7 +25,7 @@ const decrypt = async (name: string): Promise<string> => {
     stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(process.stdout).text(), new Response(process.stderr).text(), process.exited,
+    new Response(process.stdout).text().then((text) => { if (text.length > 1_048_576) throw new Error("Key Ring stdout exceeds the configured byte limit"); return text; }), new Response(process.stderr).text().then((text) => { if (text.length > 1_048_576) throw new Error("Key Ring stderr exceeds the configured byte limit"); return text; }), process.exited,
   ]);
   if (exitCode !== 0) throw new Error(`Key Ring failed for ${name}: ${stderr.trim().slice(0, 160)}`);
   return stdout.trim();

@@ -52,10 +52,18 @@ const asSignature = (value: unknown): unknown => {
     },
   };
 };
-export const signLedgerTypedData = async (expectedOwner: Address, typedData: Readonly<Record<string, unknown>>): Promise<Hex> => {
+export const signLedgerTypedData = async (expectedOwner: Address, typedData: Readonly<Record<string, unknown>>): Promise<{
+  readonly signature: Hex;
+  readonly clearSigning: Readonly<Record<string, unknown>> | null;
+}> => {
   const raw = await ledgerSignTypedData(typedData);
+  const jsoned = jsonable(raw);
   const parsed = signedSchema.safeParse(asSignature(raw));
   if (!parsed.success) throw new Error(`Ledger typed-data signature is malformed: ${JSON.stringify(jsonable(raw))}`);
   if (parsed.data.owner !== expectedOwner) throw new Error("Connected Ledger account does not match the authenticated owner");
-  return joinLedgerSignature(parsed.data.signature);
+  const envelope = z.object({ clearSigning: z.record(z.string(), z.unknown()).nullable().optional() }).loose().safeParse(jsoned);
+  return {
+    signature: joinLedgerSignature(parsed.data.signature),
+    clearSigning: envelope.success && envelope.data.clearSigning !== undefined ? envelope.data.clearSigning : null,
+  };
 };

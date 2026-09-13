@@ -8,7 +8,7 @@
     "aqua-mcp-signer": "src/signer.ts"
   },
   "scripts": {
-    "build": "bun build src/main.ts src/signer.ts src/ledger.ts src/ledger-runtime.mjs src/bazantic-tools.ts --target=bun --outdir=dist",
+        "build": "bun build src/main.ts src/signer.ts src/ledger.ts src/ledger-runtime.mjs src/mcp-tools.ts --target=bun --outdir=dist",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "test": "bun test"

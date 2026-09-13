@@ -10,19 +10,19 @@ import {
 } from "./mcp-check.ts";
 
 describe("mcp-check helpers", () => {
-  test("accepts gateway, bridge, and all modes", () => {
-    expect(parseMcpCheckMode("gateway")).toBe("gateway");
-    expect(parseMcpCheckMode("bridge")).toBe("bridge");
+  test("accepts hosted, bridge, and all modes", () => {
     expect(parseMcpCheckMode("hosted")).toBe("hosted");
-    expect(() => parseMcpCheckMode("pay")).toThrow();
+    expect(parseMcpCheckMode("bridge")).toBe("bridge");
+    expect(parseMcpCheckMode("all")).toBe("all");
+    expect(() => parseMcpCheckMode("gateway")).toThrow();
   });
 
-  test("matches required tools through the Bazantic alias table", () => {
+  test("matches required tools by canonical snake_case names", () => {
     expect(missingRequiredAquaTools([
-      "requestTrade", "postTrade", "getTrades", "createTradeCancellation",
-      "subscribeToUser", "unsubscribeFromUser", "wipeSubscribedTrades",
+      "request_trade", "post_trade", "get_trades", "cancel_trade",
+      "subscribe_to_user", "unsubscribe_from_user", "wipe_subscribed_trades",
     ])).toEqual([]);
-    expect(missingRequiredAquaTools(["requestTrade"])).toContain("cancel_trade");
+    expect(missingRequiredAquaTools(["request_trade"])).toContain("cancel_trade");
   });
 
   test("treats a missing or expired oauth.json as not fresh", async () => {

@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { GATEWAY_NAME, HOSTED_VERCEL_CONFIG, PINNED_PUBLIC_ORIGIN, assertAliasedOrigin, parseVercelDeploymentUrl, requirePublicOrigin, rewriteManifestPublicOrigin } from "./deploy-bazantic-gateway.ts";
+import { HOSTED_VERCEL_CONFIG, PINNED_PUBLIC_ORIGIN, assertAliasedOrigin, parseVercelDeploymentUrl, requirePublicOrigin, rewriteManifestPublicOrigin } from "./deploy-vercel.ts";
 import { runtimeManifestSchema } from "@aqua/core";
 
 const address = (digit: string) => `0x${digit.repeat(40)}`;
 const hash = (digit: string) => `0x${digit.repeat(64)}`;
 const contract = (digit: string) => ({ address: address(digit), runtimeCodeHash: hash(digit) });
 
-describe("Bazantic gateway deploy helpers", () => {
+describe("Vercel deploy helpers", () => {
   test("requires the Aliased host and never falls back to a unique URL", () => {
     const log = [
       "Inspect: https://vercel.com/acme/aqua/A1B2",
@@ -35,7 +35,6 @@ describe("Bazantic gateway deploy helpers", () => {
   test("deploys the hosted API with a 300s function budget", () => {
     expect(HOSTED_VERCEL_CONFIG.framework).toBe("bun");
     expect(HOSTED_VERCEL_CONFIG.functions["src/server.js"].maxDuration).toBe(300);
-    expect(GATEWAY_NAME).toBe("Aqua transaction preparation API");
   });
 
   test("rewrites manifest auth and service URLs to the pinned public origin only", () => {

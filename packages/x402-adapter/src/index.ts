@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
+import { MCP_PAYMENT_META_KEY, MCP_PAYMENT_RESPONSE_META_KEY, isPaymentRequiredError } from "@x402/mcp";
 import type { PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import { addressSchema, positiveAmountSchema } from "@aqua/core";
 import type { Address, RuntimeManifest } from "@aqua/core";
 import { z } from "zod";
+
+/** SEP-1036 UrlElicitationRequired; @x402/mcp 2.25.0 types export this but the ESM bundle does not. */
+export const JSONRPC_PAYMENT_REQUIRED_CODE = -32042;
+export { MCP_PAYMENT_META_KEY, MCP_PAYMENT_RESPONSE_META_KEY, isPaymentRequiredError };
 
 export const PERMIT2_ADDRESS=addressSchema.parse("0x000000000022D473030F116dDEE9F6B43aC78BA3".toLowerCase());
 export const X402_EXACT_PERMIT2_PROXY=addressSchema.parse("0x402085c248EeA27D92E8b30b2C58ed07f9E20001".toLowerCase());
@@ -17,8 +22,8 @@ export const exactPermit2UpfrontRequirement=(manifest:RuntimeManifest,input:Fund
   return {x402Version:2,error:"Payment is required before trade activation",resource:{url:`${manifest.services.apiUrl}/v1/trades`,description:"Fund the exact immutable Ledger-owned trade plan"},accepts:[accepted]};
 };
 
-export const unpaidMcpResult=(paymentRequired:PaymentRequired)=>({isError:true as const,content:[{type:"text" as const,text:"Order vault funding is required before activation"}],_meta:{"x402/payment":paymentRequired}});
-export const paidMcpResult=(body:unknown,paymentResponse:unknown)=>({content:[{type:"text" as const,text:JSON.stringify(body)}],_meta:{"x402/payment-response":paymentResponse}});
+export const unpaidMcpResult=(paymentRequired:PaymentRequired)=>({isError:true as const,content:[{type:"text" as const,text:"Order vault funding is required before activation"}],_meta:{[MCP_PAYMENT_META_KEY]:paymentRequired}});
+export const paidMcpResult=(body:unknown,paymentResponse:unknown)=>({content:[{type:"text" as const,text:JSON.stringify(body)}],_meta:{[MCP_PAYMENT_RESPONSE_META_KEY]:paymentResponse}});
 
 export interface TokenSimulation {readonly codePresent:boolean;readonly allowance:bigint;readonly balanceBefore:bigint;readonly balanceAfter:bigint;readonly expectedDelta:bigint;readonly stableBalance:boolean}
 export const assertStandardTokenFunding=(simulation:TokenSimulation):void=>{if(!simulation.codePresent||simulation.allowance<simulation.expectedDelta||!simulation.stableBalance||simulation.balanceAfter-simulation.balanceBefore!==simulation.expectedDelta)throw new Error("Token failed code, allowance, stability, or exact balance-delta policy");};

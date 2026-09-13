@@ -1,27 +1,22 @@
 import { addressSchema, AppError } from "@aqua/core";
-import type { Address, DirectSwapRequest } from "@aqua/core";
-import type { DirectQuoteResult, ProtocolService } from "@aqua/contracts";
-import type { AquaQuoteRequest } from "./schemas.ts";
+import type { Address } from "@aqua/core";
 import type { OneInchPriceClient } from "./one-inch.ts";
 
 export interface QuoterServiceConfiguration {
   readonly chainId: number;
   readonly defaultCurrency: string;
   readonly priceClient: OneInchPriceClient | null;
-  readonly protocol: Pick<ProtocolService, "quoteDirect">;
 }
 
 export class QuoterService {
   private readonly chainId: number;
   private readonly defaultCurrencyValue: string;
   private readonly priceClient: OneInchPriceClient | null;
-  private readonly protocol: Pick<ProtocolService, "quoteDirect">;
 
   public constructor(configuration: QuoterServiceConfiguration) {
     this.chainId = configuration.chainId;
     this.defaultCurrencyValue = configuration.defaultCurrency;
     this.priceClient = configuration.priceClient;
-    this.protocol = configuration.protocol;
   }
 
   public get defaultCurrency(): string { return this.defaultCurrencyValue; }
@@ -54,20 +49,5 @@ export class QuoterService {
     if (this.priceClient === null) return null;
     try { return await this.priceClient.price(this.chainId, address, currency); }
     catch { return null; }
-  }
-
-  public quote(request: AquaQuoteRequest, taker: Address): Promise<DirectQuoteResult> {
-    const input: DirectSwapRequest = {
-      routerKind: request.routerKind, encodedOrder: request.encodedOrder,
-      tokenIn: request.tokenIn, tokenOut: request.tokenOut,
-      ...(request.amountIn === undefined ? {} : { amountIn: request.amountIn }),
-      ...(request.amountOut === undefined ? {} : { amountOut: request.amountOut }),
-      slippageBps: 50,
-      ...(request.deadline === undefined ? {} : { deadline: request.deadline }),
-      ...(request.lifetimeSeconds === undefined ? {} : { lifetimeSeconds: request.lifetimeSeconds }),
-      ...(request.recipient === undefined ? {} : { recipient: request.recipient }),
-      payWithNative: false, receiveNative: request.receiveNative,
-    };
-    return this.protocol.quoteDirect(input, taker);
   }
 }

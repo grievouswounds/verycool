@@ -6,7 +6,7 @@ An Aqua order-book and trading API implemented with `Bun.serve`. The canonical a
 
 The local stdio bridge `aqua-ledger-key-ring` still keeps the agent key in Ledger Key Ring ciphertext on the laptop. `wallet-cli ring destroy` tears down the trustchain root (including Ledger Sync) and member rotation orphans old ciphertext.
 
-Hosted Streamable HTTP is `https://vercel-henna-gamma-46.vercel.app/mcp` (server name `aqua`). Unique `*.vercel.app` deployment URLs fail WebAuthn.
+Hosted Streamable HTTP `https://vercel-henna-gamma-46.vercel.app/mcp` (server name `aqua`) remains for `mcp-check hosted` / OAuth conformance. MCP Jam uses stdio `aqua-ledger-key-ring` only. Unique `*.vercel.app` deployment URLs fail WebAuthn.
 
 It also monitors confirmed ERC-20 transfers for addresses selected by authenticated users. Collection is polling-based: a separate worker wakes once per minute and writes results to PostgreSQL; subscribing never opens a websocket.
 
@@ -66,7 +66,7 @@ Both `nix develop -c -- dev --prod` and `nix run .#dev` use API hot reload on th
 - `nix develop` installs dependencies with Aube and exposes the complete toolchain without leaving background processes behind. The `dev`/`start` supervisor owns PostgreSQL initialization and migrations. Change dependencies only with Aube (`aube add`, `aube remove`); the lockfile is authoritative and produced by Aube 1.17.
 - Run `aube run check` for strict TypeScript, 100% type coverage, zero-`any` AST inspection, ESLint, tests, dependency policy, and the production bundle.
 - Run `aube run codegen:check` to verify the committed Cubane selector manifest.
-- Enter the reproducible shell with `nix develop`. `dev --prod` and `nix develop -c -- dev --prod` launch the physical-Ledger hot-reload stack; `dev --dev` or `nix develop -c dev-emulated` launches the Speculos stack. `start --prod` launches the physical stack without hot reload. `aube run deploy --dev` or `deploy --prod` bundles the API and facilitator, deploys them to Vercel, and registers a Bazantic gateway draft.
+- Enter the reproducible shell with `nix develop`. `dev --prod` and `nix develop -c -- dev --prod` launch the physical-Ledger hot-reload stack; `dev --dev` or `nix develop -c dev-emulated` launches the Speculos stack. `start --prod` launches the physical stack without hot reload. `aube run deploy --dev` or `deploy --prod` bundles the API and facilitator and deploys them to Vercel.
 
 ### Command reference
 
@@ -105,8 +105,8 @@ aube run codegen                   # regenerate committed Cubane selectors
 aube run codegen:check             # fail when generated selectors are stale
 aube run docs:check                # check OpenAPI/native-route synchronization
 aube run check                     # complete local acceptance suite
-aube run deploy                    # bundle API+facilitator, deploy to Vercel, register Bazantic draft
-aube run test:mcp                  # headless MCPJam checks against the gateway, stdio bridge, or both
+aube run deploy                    # bundle API+facilitator, deploy to Vercel
+aube run test:mcp                  # headless MCPJam checks against the hosted origin, stdio bridge, or both
 ```
 
 Nix:
@@ -121,10 +121,10 @@ nix develop -c -- start --prod     # physical Ledger stack, no hot reload
 nix develop -c start-emulated      # Speculos stack, no hot reload
 nix run .#dev                      # start the physical stack without entering a shell
 nix run .#start                    # start the complete non-hot physical stack
-nix develop -c deploy              # same as aube run deploy (needs live API + baz login)
+nix develop -c deploy              # same as aube run deploy
 nix run .#deploy                   # publish the hosted API on Vercel
-nix develop -c mcp-check gateway   # headless MCPJam doctor + tools/list against the Bazantic MCP URL
-nix run .#mcp-check                # same checks; pass gateway, bridge, or all
+nix develop -c mcp-check hosted    # headless MCPJam doctor + tools/list against origin /mcp
+nix run .#mcp-check                # same checks; pass hosted, bridge, or all
 nix run .#api -- --config /absolute/path/runtime-manifest.json # API only
 nix build .#api                    # build the API launcher
 nix build .#worker                 # build the activity-worker launcher
@@ -139,85 +139,31 @@ Cubane 0.3.12 is the first-party EVM boundary. The API, workers, contracts adapt
 
 All JSON request objects are strict: unknown keys are rejected. Amounts are canonical unsigned decimal strings. Addresses are 20-byte hexadecimal strings. Calldata, signatures, salts, and hashes are even-length `0x` byte strings. The deployment owns `CHAIN_ID`; request bodies cannot select a chain.
 
-Authenticated endpoints require `Authorization: Bearer <access-token>`. Access tokens are short-lived, resource-bound PASETO `v4.public` tokens; refresh tokens remain opaque, single-use secrets in the secure `refresh_token` cookie. Authentication and scope failures include RFC 6750 `WWW-Authenticate` challenges. Errors use RFC 9457 `application/problem+json`, with structured validation issues for agents. The generated OpenAPI 3.1 document is served at `/openapi.json`; `/docs` serves interactive Swagger UI. `/v1/capabilities` gives agents a compact description of grammars, alternatives, defaults, and supported order policies.
+Authenticated endpoints require `Authorization: Bearer <access-token>`. Access tokens are short-lived, resource-bound PASETO `v4.public` tokens; refresh tokens remain opaque, single-use secrets in the secure `refresh_token` cookie. Authentication and scope failures include RFC 6750 `WWW-Authenticate` challenges. Errors use RFC 9457 `application/problem+json`, with structured validation issues for agents. The generated OpenAPI 3.1 document is served at `/openapi.json`; `/docs` serves interactive Swagger UI. Agent discovery of the seven MCP tools is the `.agents/skills/aqua-trading` skill.
 
 - `POST /v1/auth/challenges`: `{ "address": "0x…" }`
 - `POST /v1/auth/sessions`: `{ "challengeId": "uuid", "message": "exact challenge message", "signature": "0x…" }`
-- `POST /v1/auth/refresh`: no body; rotates the secure `refresh_token` cookie.
+- Ledger FIDO2 ceremony under `/v1/auth/ledger/*`.
 - `POST /v1/trade-previews`: resolve address/search/native token references and return an immutable five-minute plan with classification and RPC safety checks.
 - `POST /v1/trades`: submit `{previewId, previewHash, lifecycleSignature}` with `Idempotency-Key`; the first request returns x402 v2 `PAYMENT-REQUIRED` for an exact Permit2 retry.
 - `GET /v1/trades`: select `own`, `subscriptions`, or `all`, with filters, stable sorting, and cursor pagination.
 - `POST /v1/agents/me/challenges` and `PUT /v1/agents/me`: bind the local LKRP agent by EIP-712 proof of possession.
 - `POST /v1/delegations/previews` and `POST /v1/delegations`: prepare and relay bounded Ledger-owner policies.
 - `POST /v1/trade-subscriptions`, `DELETE /v1/trade-subscriptions/{address}`, and `POST /v1/trade-subscriptions/trades/wipe`: manage subscribed-wallet trade projections.
-- `POST /v1/trading`: retained for advanced REST-only workflows.
-- `GET /v1/prices/address/{address}` and `GET /v1/prices/name/{name}`: authenticated deployment-chain spot prices. These return `503` when `ONEINCH_API_KEY` is not configured.
-- `POST /v1/quotes/aqua`: authenticated, read-only exact-input or exact-output simulation for one encoded Aqua order.
-
-`POST /v1/trading` also accepts `prepareSwap` for raw encoded orders. It quotes and simulates with the authenticated wallet as taker, then returns only unsigned approval, wrapping, and swap transactions; the API never accepts a wallet key or broadcasts on the caller's behalf.
-
-```json
-{"routerKind":"aquaLimit","encodedOrder":"0x…","tokenIn":"0x1111111111111111111111111111111111111111","tokenOut":"0x2222222222222222222222222222222222222222","amountIn":"1"}
-```
-
-```json
-{"action":"prepareSwap","swap":{"routerKind":"aquaLimit","encodedOrder":"0x…","tokenIn":"0x1111111111111111111111111111111111111111","tokenOut":"0x2222222222222222222222222222222222222222","amountIn":"1","slippageBps":"50"}}
-```
 
 All trading amounts and prices are human decimal strings. Price always means quote-token units per one base token. The backend resolves ERC-20 decimals and converts to atomic integers with exact `bigint` arithmetic and maker-favouring rounding. Scientific notation, signs, separators, noncanonical zeroes, excess precision, unknown fields, duplicate keys, and prototype keys are rejected.
 
-```json
-{"action":"createOrder","order":{"kind":"limit","pair":{"baseToken":"0x1111111111111111111111111111111111111111","quoteToken":"0x2222222222222222222222222222222222222222"},"side":"sell","size":{"denomination":"base","amount":"1.5"},"limitPrice":"2500"}}
-```
-
-```json
-{"action":"query","query":{"resource":"orderBook","pair":{"baseToken":"0x1111111111111111111111111111111111111111","quoteToken":"0x2222222222222222222222222222222222222222"},"depth":"20"}}
-```
-
-Supported orders are market, limit, stop-market, stop-limit, trailing-stop, take-profit market/limit, OCO, and bracket. Policies include GTC, GTD, IOC, FOK, partial, all-or-none, post-only, and book-or-cancel. Queries cover orders, fills, book depth, ticker, recent trades, candles, balances, and fees. Batches are capped at 20 operations.
-
-Conditional commands on the legacy `/v1/trading` route continue to use `aqua-intent-v1`. The canonical `/v1/trades` route uses standard x402 v2 exact Permit2 funding.
-
-Legacy trading routes were removed in API v1. Migrate them to the corresponding `/v1/trading` action. Swagger includes complete schemas and examples at `/docs`; `/v1/capabilities` is the compact machine-readable discovery surface.
-
-### ERC-20 monitoring
-
-All monitoring operations require a bearer access token. Subscriptions belong to the authenticated wallet, even when it monitors an unrelated public address.
-
-```http
-POST /v1/erc20-monitor/subscriptions
-Content-Type: application/json
-
-{"address":"0x1111111111111111111111111111111111111111"}
-```
-
-The first scan includes the preceding minute at the configured confirmation depth. Repeating the request is idempotent. List subscriptions with `GET /v1/erc20-monitor/subscriptions` and stop future collection with `DELETE /v1/erc20-monitor/subscriptions/{address}`. Unsubscribing retains collected actions.
-
-Use `GET /v1/erc20-monitor/actions` for all subscriptions, or add `address`, `classification`, `from`, `to`, `cursor`, and `limit` query parameters. Limits default to 50 and cannot exceed 200. On-chain amounts, block numbers, log indexes, confirmations, and deletion counts are returned as decimal strings.
-
-Wiping is deliberately explicit:
-
-```json
-{"scope":"address","address":"0x1111111111111111111111111111111111111111"}
-```
-
-or:
-
-```json
-{"scope":"all","confirmation":"WIPE_ALL_ERC20_ACTIVITY"}
-```
-
-Send either body to `POST /v1/erc20-monitor/actions/wipe`. A pure incoming transfer is `received`, not automatically a `buy`. Buy/sell labels are emitted only when a transaction contains opposite-direction transfers of different ERC-20 tokens involving the watched address, and carry `classificationSource: "inferredCounterflow"`. Native-currency counterflows are not guessed.
+Supported MCP/trade policies are market, limit, stop-market, stop-limit, trailing-stop, take-profit market/limit, OCO, and bracket. The canonical `/v1/trades` route uses standard x402 v2 exact Permit2 funding. Swagger includes complete schemas and examples at `/docs`.
 
 `payWithNative` prepares a wrapped-native deposit before the SwapVM call. The pinned SwapVM v1.0.2 `swap` entry point is non-payable, so the swap itself intentionally has zero native value. `receiveNative` uses the router unwrap trait and is restricted to the configured wrapped-native token.
 
 ## Hosted MCP (Acts 1–3)
 
-Two Ledger apps, never at the same time. Trades on hosted `/mcp` use neither.
+Two Ledger apps, never at the same time. MCP Jam uses **stdio only** (`aqua-ledger-key-ring`). Hosted Streamable HTTP `/mcp` stays deployed for `mcp-check hosted` / OAuth conformance.
 
-1. **Act 1 — once, USB, terminal.** `nix develop`, quit Ledger Live, `AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app bun scripts/setup-hosted-owner.ts`. Ethereum app: SIWE. Security Key app: FIDO2 register **and immediately** FIDO2 authenticate (hardware PASETO). The script then `POST /v1/agents/provision`. Ethereum app again: one EIP-712 delegation per fixture token (`maxPerOrder = 1`, `maxPerDay = 100`, 7 days). Fund the printed agent. Optional `--fund`. Status: `GET /setup?owner=0x…` (read-only).
-2. **Act 2 — once per MCP Jam session.** Add `https://vercel-henna-gamma-46.vercel.app/mcp`. The Room opens in the default browser. Type the enrolled owner, Knock, confirm on the Security Key app. Redirect returns `code`, `state`, and `iss`.
-3. **Act 3 — every trade.** `request_trade` then `post_trade`. The server unwraps the owner agent key and signs. No browser. No device. A 409 `delegation-required` names `/setup` and `setup-hosted-owner.ts`.
+1. **Act 1 — once, USB, terminal.** `nix develop`, quit Ledger Live, `AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app bun scripts/setup-hosted-owner.ts`. Ethereum app: SIWE. Security Key app: FIDO2 register **and immediately** FIDO2 authenticate (hardware PASETO). The script then `POST /v1/agents/provision`. Ethereum app again: one EIP-712 delegation per fixture token (`maxPerOrder = 1`, `maxPerDay = 100`, 7 days). Fund the printed agent. Optional `--fund`. Status: `GET /setup?owner=0x…` (read-only). Hosted AgentVault is not the Jam path.
+2. **Act 2 — once per MCP Jam session.** Add one stdio server: `bun apps/mcp-bridge/src/main.ts --prod` with `AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app`, `AQUA_RPC_URL`, and `XDG_STATE_HOME`. First tool call opens the Room in the default browser. Type the enrolled owner, Knock, confirm on the Security Key app. Loopback `http://127.0.0.1:$AQUA_OAUTH_CALLBACK_PORT/callback`. Device stays dark on market trades unless a 409 needs the Ethereum app. Set `AQUA_LEDGER_ORIGIN_TOKEN` for Clear Signing; `post_trade` reports `clearSigning.isBlindSign` when the owner Ledger signed.
+3. **Act 3 — every trade.** Chat `request_trade` then `post_trade` (same snake_case tools). Approve the preview. `post_trade` signs in the local LKRP keyring and pays Aqua Permit2 on the origin. You should see a trade record. A 409 `delegation-required` still uses the Ethereum app over USB.
 
 ## Local MCP bridge
 
@@ -225,15 +171,11 @@ Two Ledger apps, never at the same time. Trades on hosted `/mcp` use neither.
 
 The bridge discovers the Bun API's OAuth metadata, registers a loopback client, opens the Ledger FIDO2 authorization ceremony in the browser, and stores its rotating refresh token in a mode-0600 local cache. Its audience is the Bun API resource URI, not a remote MCP URL. `AQUA_ACCESS_TOKEN` remains an explicit development override. Set `AQUA_API_URL` when it differs from `http://127.0.0.1:3000`; `AQUA_OAUTH_CALLBACK_PORT` defaults to `41739`. Optional `AQUA_AGENT_CIPHERTEXT`, `AQUA_AGENT_METADATA`, `AQUA_PREVIEW_CACHE`, and `AQUA_OAUTH_CACHE` paths relocate local state. Pass `--dev` for the Speculos signer or `--prod` for a physical Ledger; MCPJam should put the same flag in the stdio args (or set `AQUA_LEDGER`).
 
-### Bazantic discovery and x402 payments
+### x402 payments and Clear Signing
 
-`packages/bazantic` adds bounded MCP catalog discovery, per-gateway `tools/list` discovery, and a shared x402-paying HTTP client. Gateway hosts are accepted only from Bazantic catalog results, REST paths remain relative to those hosts, and a paid call is attempted only after an unpaid probe returns `402`. Bazantic `tools/call` is discovery-only because ordinary MCP clients cannot settle its payment challenge; paid work uses the discovered REST path.
+`packages/x402-client` is the bounded Permit2-paying HTTP client used by the stdio bridge and hosted `/mcp`. Aqua trade activation funds the exact Permit2 vault request on the deployment chain. Hosted callers without a delegated agent vault receive MCP JSON-RPC `-32042`. Discovery is the `.agents/skills/aqua-trading` skill rather than a marketplace listing.
 
-The same isolated LKRP/Cubane signer serves both payment profiles, but they are intentionally different. Aqua trade activation funds the exact Permit2 vault request on the deployment chain (local Anvil is `eip155:31337`) and keeps the local facilitator. Bazantic accepts only exact Base USDC (`eip155:8453`) requirements within the caller's atomic-unit ceiling, which defaults to `10000` (0.01 USDC). Fund the agent address with Anvil gas and sell tokens for local Aqua trades and, independently, with USDC plus gas on Base for Bazantic calls. `wallet-cli` cannot send on Base, so use another reviewed Base-capable funding path.
-
-The Bazantic CLI, hosted grants, and `BAZANTIC_GATEWAY_PRIVATE_KEY` are not runtime dependencies. 1inch Aqua quotes remain local SwapVM `eth_call` simulations; `ONEINCH_API_KEY` enables only optional spot-price endpoints.
-
-`aube run deploy` (or `nix develop -c deploy`) bundles `apps/api` and `apps/facilitator` into `out/vercel`, deploys that artifact to Vercel, and registers a Bazantic draft against `/openapi.gateway.json` (`--auth-type x402-mpp`, override with `AQUA_BAZANTIC_AUTH_TYPE=api-key` if the CLI rejects `x402-mpp`). `AQUA_PUBLIC_ORIGIN` is the sole public host; the Aliased Vercel host must match it. Upsert `AQUA_AGENT_KEK` (32 bytes) and keep `AQUA_AGENT_KEY` for the platform broker. MCP Jam uses `{AQUA_PUBLIC_ORIGIN}/mcp`, not the Bazantic MCP URL. Prerequisites: `baz login` with `gateway:write`, a production runtime manifest at `.data/runtime-manifest.production.json` (reuse pinned Sepolia contracts; do not redeploy the factory), Neon Postgres `DATABASE_URL`, env signing keys, and the Vercel CLI. Delete probe gateway `7cjtotejxfb63n74uqsrqx2xmi` from the dashboard by hand.
+`aube run deploy` (or `nix develop -c deploy`) bundles `apps/api` and `apps/facilitator` into `out/vercel` and deploys that artifact to Vercel. `AQUA_PUBLIC_ORIGIN` is the sole public host; the Aliased Vercel host must match it. MCP Jam uses stdio `aqua-ledger-key-ring`, not `{AQUA_PUBLIC_ORIGIN}/mcp`. `mcp-check bridge` is the Jam-shaped check; `mcp-check hosted` is origin `/mcp` doctor, tools/list, protocol, and OAuth conformance.
 
 ## Configuration
 
@@ -247,9 +189,9 @@ Rotate access-token keys by deploying the new public key to every verifier first
 
 ## Speculos end-to-end evidence
 
-Run `nix develop -c e2e` for the deterministic Linux suite, `nix develop -c e2e-physical` against a connected Ledger (no Speculos, `node-hid`, operator-confirmed screens), `nix develop -c e2e-bazantic-canary` for the free live Bazantic discovery check, or `nix develop -c e2e-all` for both emulator checks. On macOS the emulator command enters a Linux container whose test environment is still constructed by `nix develop`; Linux runs directly. Physical mode skips that trampoline because node-HID works natively. The deterministic suite builds pinned Nano S+ Ledger Sync, Ethereum, and Security Key applications, runs Ledger Sync, Ethereum, and Security Key in Speculos (Ethereum HTTP 5000 / APDU 9999 and Security Key on its own HTTP port with APDU 5001 `--usb U2F` concurrently during MCP), deploys the pinned upstream Aqua/SwapVM contracts on an isolated Anvil chain, and writes code, receipt, call-trace, APDU, FIDO2 OAuth, and tool-catalog evidence under `reports/e2e/`. Ethereum signing uses the production Device Management Kit path; Speculos `/automation` approves on-device review screens. The Security Key phase talks CTAPHID on Speculos `--apdu-port 5001` and completes the real OAuth 2.1 + Ledger FIDO2 ceremony (no `AQUA_ACCESS_TOKEN` bypass).
+Run `nix develop -c e2e` for the deterministic Linux suite, `nix develop -c e2e-physical` against a connected Ledger (no Speculos, `node-hid`, operator-confirmed screens), `nix develop -c e2e-hosted-mcp-canary` for the live hosted `/mcp` catalog check, or `nix develop -c e2e-all` for both emulator checks. On macOS the emulator command enters a Linux container whose test environment is still constructed by `nix develop`; Linux runs directly. Physical mode skips that trampoline because node-HID works natively. The deterministic suite builds pinned Nano S+ Ledger Sync, Ethereum, and Security Key applications, runs Ledger Sync, Ethereum, and Security Key in Speculos (Ethereum HTTP 5000 / APDU 9999 and Security Key on its own HTTP port with APDU 5001 `--usb U2F` concurrently during MCP), deploys the pinned upstream Aqua/SwapVM contracts on an isolated Anvil chain, and writes code, receipt, call-trace, APDU, FIDO2 OAuth, and tool-catalog evidence under `reports/e2e/`. Ethereum signing uses the production Device Management Kit path; Speculos `/automation` approves on-device review screens. The Security Key phase talks CTAPHID on Speculos `--apdu-port 5001` and completes the real OAuth 2.1 + Ledger FIDO2 ceremony (no `AQUA_ACCESS_TOKEN` bypass).
 
-The Bazantic canary requires `AQUA_BAZANTIC_GATEWAY_SLUG`. It resolves the listing through `https://bazgateway.com/mcp/` and calls only the catalog-issued MCP `tools/list`; it never performs `tools/call` or sends a payment header. Aqua x402 remains exact Permit2 funding in the trade's arbitrary standard ERC-20 sell token, on the deployment chain.
+The hosted MCP canary requires `AQUA_PUBLIC_ORIGIN`. It calls origin `/mcp` `tools/list` and fingerprints the seven canonical tools. Aqua x402 remains exact Permit2 funding in the trade's sell token on the deployment chain.
 
 Speculos executes real Ledger application binaries and is suitable for application protocol and cryptographic-flow testing. It does not emulate physical USB, Ledger firmware, the Secure Element, or hardware security properties, so a passing suite is not a hardware-attestation claim. Production continues to use node-HID and the released `wallet-cli`; the Speculos transport, test attestation material, and wallet adapter require `AQUA_E2E=1`.
 

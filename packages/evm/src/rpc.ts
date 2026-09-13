@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { addressSchema, hashSchema, hexSchema, quantitySchema, upstreamError } from "@aqua/core";
+import { addressSchema, hashSchema, hexSchema, parseStrictJson, quantitySchema, upstreamError } from "@aqua/core";
 import type { Address, Hash, Hex, RpcBlock, RpcCall, RpcLog, RpcLogFilter, RpcPort, RpcReceipt, RpcStateOverrides } from "@aqua/core";
 import { hasContractCode, hexToQuantity, quantityToHex, selector } from "./hex.ts";
 import { decodeString, decodeUint256 } from "./abi.ts";
@@ -68,7 +68,7 @@ export class HttpRpcTransport implements RpcTransport {
     if (!response.ok) {
       let bodyMessage: string | undefined;
       try {
-        const failed = rpcFailureSchema.safeParse(JSON.parse(await response.text()) as unknown);
+        const failed = rpcFailureSchema.safeParse(parseStrictJson(await response.text()));
         if (failed.success) bodyMessage = failed.data.error.message;
       } catch {
         bodyMessage = undefined;
@@ -85,7 +85,7 @@ export class HttpRpcTransport implements RpcTransport {
     try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
     catch { throw classifyTransport(new Error("RPC response is not valid UTF-8")); }
     let body: unknown;
-    try { body = JSON.parse(text) as unknown; }
+    try { body = parseStrictJson(text); }
     catch { throw classifyTransport(new Error("RPC response is not valid JSON")); }
     const failed = rpcFailureSchema.safeParse(body);
     if (failed.success) {

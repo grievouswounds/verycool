@@ -8,7 +8,7 @@ import {
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON, WebAuthnCredential } from "@simplewebauthn/server";
-import { AppError, addressSchema } from "@aqua/core";
+import { AppError, addressSchema, parseStrictJson } from "@aqua/core";
 import type { Address } from "@aqua/core";
 import { z } from "zod";
 
@@ -56,7 +56,7 @@ const sqlRows = <T>(value: T | T[]): T[] => Array.isArray(value) ? value : [valu
 const transportsSchema = z.array(z.enum(["ble","cable","hybrid","internal","nfc","smart-card","usb"]));
 
 const parseTransports = (value: unknown): WebAuthnCredential["transports"] =>
-  transportsSchema.parse(typeof value === "string" ? JSON.parse(value) : value);
+  transportsSchema.parse(typeof value === "string" ? parseStrictJson(value) : value);
 export class PostgresLedgerWebAuthnStore implements LedgerWebAuthnStore {
   private readonly database: SQL;
   public constructor(database: SQL) { this.database = database; }

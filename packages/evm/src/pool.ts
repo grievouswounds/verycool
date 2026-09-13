@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { hashSchema, hexSchema, quantitySchema, upstreamError } from "@aqua/core";
+import { hashSchema, hexSchema, parseBoundedJsonRequest, quantitySchema, upstreamError } from "@aqua/core";
 import type { RpcPort } from "@aqua/core";
 import { hexToBytes, hexToQuantity, keccakHex } from "./hex.ts";
 import type { RpcEndpoint } from "./endpoints.ts";
@@ -386,7 +386,7 @@ export const serveRpcProxy = (client: PooledRpcClient): { readonly url: string; 
     hostname: "127.0.0.1",
     port: 0,
     fetch: async (request) => {
-      const parsed = bodySchema.safeParse(await request.json());
+      const parsed = bodySchema.safeParse(await parseBoundedJsonRequest(request));
       if (!parsed.success) {
         return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32_600, message: "Invalid request" } }, { status: 400 });
       }

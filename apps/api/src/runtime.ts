@@ -56,7 +56,7 @@ export const createApiRuntime = async (argv: readonly string[] = Bun.argv): Prom
   const oneInchApiKey = Bun.env["ONEINCH_API_KEY"]?.trim();
   const oneInchBaseUrl = new URL(Bun.env["ONEINCH_BASE_URL"] ?? "https://api.1inch.com");
   const oneInchDefaultCurrency = currencySchema.parse(Bun.env["ONEINCH_DEFAULT_CURRENCY"] ?? "USD");
-  const quoter = new QuoterService({ chainId: manifest.chain.id, defaultCurrency: oneInchDefaultCurrency, protocol, priceClient: oneInchApiKey === undefined || oneInchApiKey.length === 0 ? null : new OneInchPriceClient({ apiKey: oneInchApiKey, baseUrl: oneInchBaseUrl }) });
+  const quoter = new QuoterService({ chainId: manifest.chain.id, defaultCurrency: oneInchDefaultCurrency, priceClient: oneInchApiKey === undefined || oneInchApiKey.length === 0 ? null : new OneInchPriceClient({ apiKey: oneInchApiKey, baseUrl: oneInchBaseUrl }) });
   const activityRepository = new PostgresActivityRepository(database);
   await activityRepository.initialize();
   const activity = new ActivityService(activityRepository, new RpcActivityChain(rpc), BigInt(manifest.indexer.confirmations), defaults.activityMaxSubscriptionsPerUser);
