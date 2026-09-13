@@ -8,7 +8,7 @@ The local stdio bridge `aqua-ledger-key-ring` still keeps the agent key in Ledge
 
 Hosted Streamable HTTP `https://vercel-henna-gamma-46.vercel.app/mcp` (server name `aqua`) remains for `mcp-check hosted` / OAuth conformance. MCP Jam uses stdio `aqua-ledger-key-ring` only. Unique `*.vercel.app` deployment URLs fail WebAuthn.
 
-It also monitors confirmed ERC-20 transfers for addresses selected by authenticated users. Collection is polling-based: a separate worker wakes once per minute and writes results to PostgreSQL; subscribing never opens a websocket.
+It also monitors confirmed ERC-20 transfers for addresses selected by authenticated users. Collection is polling-based: a separate worker wakes every ten seconds and writes results to PostgreSQL; subscribing never opens a websocket.
 
 ## Technology stack
 
@@ -59,14 +59,14 @@ docker compose up --build
 
 Raise the WSL2 memory allocation before the first image build; Speculos and the Ledger apps compile from source. Persist `WALLET_PASS` across restarts in the container data volume so the keyring stays decryptable.
 
-Both `nix develop -c -- dev --prod` and `nix run .#dev` use API hot reload on the physical path. Pass `--dev` for Speculos. Use `nix develop -c -- start --prod` for that stack without hot reload, and `nix develop -c start-emulated` (or `start --dev`) for the emulated equivalent. The same `--dev` / `--prod` flags apply to `deploy`, `ledger-bootstrap`, `e2e`, `mcp-check`, `enroll-ledger`, and `apps/mcp-bridge`. Run `nix develop -c ledger-bootstrap --prod` for explicit device diagnostics or recovery.
+Both `nix develop -c -- dev --prod` and `nix run .#dev` use API hot reload on the physical path. Pass `--dev` for Speculos. Use `nix develop -c -- aqua-start --prod` for that stack without hot reload, and `nix develop -c start-emulated` (or `aqua-start --dev`) for the emulated equivalent. The same `--dev` / `--prod` flags apply to `deploy`, `ledger-bootstrap`, `e2e`, `mcp-check`, and `apps/mcp-bridge`. Run `nix develop -c ledger-bootstrap --prod` for explicit device diagnostics or recovery. Ledger SIWE enrollment is `bun scripts/enroll-ledger.ts`, not a Nix wrapper.
 
 ## Toolchain
 
 - `nix develop` installs dependencies with Aube and exposes the complete toolchain without leaving background processes behind. The `dev`/`start` supervisor owns PostgreSQL initialization and migrations. Change dependencies only with Aube (`aube add`, `aube remove`); the lockfile is authoritative and produced by Aube 1.17.
 - Run `aube run check` for strict TypeScript, 100% type coverage, zero-`any` AST inspection, ESLint, tests, dependency policy, and the production bundle.
 - Run `aube run codegen:check` to verify the committed Cubane selector manifest.
-- Enter the reproducible shell with `nix develop`. `dev --prod` and `nix develop -c -- dev --prod` launch the physical-Ledger hot-reload stack; `dev --dev` or `nix develop -c dev-emulated` launches the Speculos stack. `start --prod` launches the physical stack without hot reload. `aube run deploy --dev` or `deploy --prod` bundles the API and facilitator and deploys them to Vercel.
+- Enter the reproducible shell with `nix develop`. `dev --prod` and `nix develop -c -- dev --prod` launch the physical-Ledger hot-reload stack; `dev --dev` or `nix develop -c dev-emulated` launches the Speculos stack. `aqua-start --prod` launches the physical stack without hot reload. `aube run deploy --dev` or `deploy --prod` bundles the API and facilitator and deploys them to Vercel.
 
 ### Command reference
 
@@ -107,6 +107,11 @@ aube run docs:check                # check OpenAPI/native-route synchronization
 aube run check                     # complete local acceptance suite
 aube run deploy                    # bundle API+facilitator, deploy to Vercel
 aube run test:mcp                  # headless MCPJam checks against the hosted origin, stdio bridge, or both
+aube run db:migrate                # apply PostgreSQL migrations
+aube run identities                # print broker signer public identities
+aube run test:e2e                  # deterministic Speculos e2e (same as `e2e`)
+aube run test:e2e:hosted           # live hosted /mcp canary
+aube run test:e2e:all              # emulator suite plus hosted canary
 ```
 
 Nix:
@@ -117,14 +122,15 @@ nix develop                         # enter the complete native toolchain
 nix develop -c -- dev --prod       # physical Ledger development stack
 nix develop -c -- dev --dev        # Speculos development stack (Docker on macOS)
 nix develop -c dev-emulated        # same as dev --dev
-nix develop -c -- start --prod     # physical Ledger stack, no hot reload
+nix develop -c -- aqua-start --prod # physical Ledger stack, no hot reload
 nix develop -c start-emulated      # Speculos stack, no hot reload
 nix run .#dev                      # start the physical stack without entering a shell
-nix run .#start                    # start the complete non-hot physical stack
+nix run .#start                    # start the complete non-hot physical stack (`aqua-start`)
 nix develop -c deploy              # same as aube run deploy
 nix run .#deploy                   # publish the hosted API on Vercel
 nix develop -c mcp-check hosted    # headless MCPJam doctor + tools/list against origin /mcp
 nix run .#mcp-check                # same checks; pass hosted, bridge, or all
+nix develop -c check-local         # local acceptance without the full e2e suite
 nix run .#api -- --config /absolute/path/runtime-manifest.json # API only
 nix build .#api                    # build the API launcher
 nix build .#worker                 # build the activity-worker launcher
@@ -139,17 +145,22 @@ Cubane 0.3.12 is the first-party EVM boundary. The API, workers, contracts adapt
 
 All JSON request objects are strict: unknown keys are rejected. Amounts are canonical unsigned decimal strings. Addresses are 20-byte hexadecimal strings. Calldata, signatures, salts, and hashes are even-length `0x` byte strings. The deployment owns `CHAIN_ID`; request bodies cannot select a chain.
 
-Authenticated endpoints require `Authorization: Bearer <access-token>`. Access tokens are short-lived, resource-bound PASETO `v4.public` tokens; refresh tokens remain opaque, single-use secrets in the secure `refresh_token` cookie. Authentication and scope failures include RFC 6750 `WWW-Authenticate` challenges. Errors use RFC 9457 `application/problem+json`, with structured validation issues for agents. The generated OpenAPI 3.1 document is served at `/openapi.json`; `/docs` serves interactive Swagger UI. Agent discovery of the seven MCP tools is the `.agents/skills/aqua-trading` skill.
+Authenticated endpoints require `Authorization: Bearer <access-token>`. Access tokens are short-lived, resource-bound PASETO `v4.public` tokens; refresh tokens remain opaque, single-use secrets in the secure `refresh_token` cookie. Authentication and scope failures include RFC 6750 `WWW-Authenticate` challenges. Errors use RFC 9457 `application/problem+json`, with structured validation issues for agents. The generated OpenAPI 3.1 document is served at `/openapi.json`; `/docs` serves interactive Swagger UI. Agent discovery of the seven MCP tools is the `.agents/skills/aqua-trading` skill. OpenAPI documents the `/v1/*` trading and auth routes; OAuth, MCP, Ledger FIDO2, and `/setup` are implemented but omitted from the OpenAPI document.
 
 - `POST /v1/auth/challenges`: `{ "address": "0x…" }`
-- `POST /v1/auth/sessions`: `{ "challengeId": "uuid", "message": "exact challenge message", "signature": "0x…" }`
-- Ledger FIDO2 ceremony under `/v1/auth/ledger/*`.
-- `POST /v1/trade-previews`: resolve address/search/native token references and return an immutable five-minute plan with classification and RPC safety checks.
-- `POST /v1/trades`: submit `{previewId, previewHash, lifecycleSignature}` with `Idempotency-Key`; the first request returns x402 v2 `PAYMENT-REQUIRED` for an exact Permit2 retry.
-- `GET /v1/trades`: select `own`, `subscriptions`, or `all`, with filters, stable sorting, and cursor pagination.
-- `POST /v1/agents/me/challenges` and `PUT /v1/agents/me`: bind the local LKRP agent by EIP-712 proof of possession.
-- `POST /v1/delegations/previews` and `POST /v1/delegations`: prepare and relay bounded Ledger-owner policies.
-- `POST /v1/trade-subscriptions`, `DELETE /v1/trade-subscriptions/{address}`, and `POST /v1/trade-subscriptions/trades/wipe`: manage subscribed-wallet trade projections.
+- `POST /v1/auth/sessions`: `{ "challengeId": "uuid", "message": "exact challenge message", "signature": "0x…" }` (issues `amr: ["siwe"]`; trading routes still require hardware AMR)
+- Ledger FIDO2 ceremony under `/v1/auth/ledger/registration/{options,verify}` and `/v1/auth/ledger/authentication/{options,verify}`
+- `POST /v1/agents/provision`: hardware-AMR Bearer; provisions the hosted agent vault
+- `POST /v1/agents/me/challenges` and `PUT /v1/agents/me`: bind the local LKRP agent by EIP-712 proof of possession
+- `POST /v1/delegations/previews` and `POST /v1/delegations`: prepare and relay bounded Ledger-owner policies
+- `POST /v1/trade-previews`: resolve address/search/native token references and return an immutable five-minute plan with classification and RPC safety checks
+- `POST /v1/trades`: submit `{previewId, previewHash, lifecycleSignature, additionalLifecycleSignatures?}` with `Idempotency-Key` equal to `previewId`; the first unpaid request returns HTTP 402 and an x402 v2 `payment-required` header for an exact Permit2 retry
+- `GET /v1/trades`: select `own`, `subscriptions`, or `all`, with filters, stable sorting, and cursor pagination
+- `POST /v1/trades/{tradeId}/cancellations` and `PUT /v1/trades/{tradeId}/cancellations/{cancellationId}`: start and sign a cancellation
+- `POST /v1/trade-subscriptions`, `DELETE /v1/trade-subscriptions/{address}`, and `POST /v1/trade-subscriptions/trades/wipe`: manage subscribed-wallet trade projections
+- `GET /setup?owner=0x…`: read-only hosted-owner status
+- `POST /mcp`: hosted Streamable HTTP MCP (503 unless `AQUA_AGENT_KEK` is set)
+- OAuth 2.1 + PKCE + dynamic registration: `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/authorize`, `/register`, `/token`, and `/oauth/authorize/{start,complete}`
 
 All trading amounts and prices are human decimal strings. Price always means quote-token units per one base token. The backend resolves ERC-20 decimals and converts to atomic integers with exact `bigint` arithmetic and maker-favouring rounding. Scientific notation, signs, separators, noncanonical zeroes, excess precision, unknown fields, duplicate keys, and prototype keys are rejected.
 
@@ -162,7 +173,7 @@ Supported MCP/trade policies are market, limit, stop-market, stop-limit, trailin
 Two Ledger apps, never at the same time. MCP Jam uses **stdio only** (`aqua-ledger-key-ring`). Hosted Streamable HTTP `/mcp` stays deployed for `mcp-check hosted` / OAuth conformance.
 
 1. **Act 1 — once, USB, terminal.** `nix develop`, quit Ledger Live, `AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app bun scripts/setup-hosted-owner.ts`. Ethereum app: SIWE. Security Key app: FIDO2 register **and immediately** FIDO2 authenticate (hardware PASETO). The script then `POST /v1/agents/provision`. Ethereum app again: one EIP-712 delegation per fixture token (`maxPerOrder = 1`, `maxPerDay = 100`, 7 days). Fund the printed agent. Optional `--fund`. Status: `GET /setup?owner=0x…` (read-only). Hosted AgentVault is not the Jam path.
-2. **Act 2 — once per MCP Jam session.** Add one stdio server: `bun apps/mcp-bridge/src/main.ts --prod` with `AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app`, `AQUA_RPC_URL`, and `XDG_STATE_HOME`. First tool call opens the Room in the default browser. Type the enrolled owner, Knock, confirm on the Security Key app. Loopback `http://127.0.0.1:$AQUA_OAUTH_CALLBACK_PORT/callback`. Device stays dark on market trades unless a 409 needs the Ethereum app. Set `AQUA_LEDGER_ORIGIN_TOKEN` for Clear Signing; `post_trade` reports `clearSigning.isBlindSign` when the owner Ledger signed.
+2. **Act 2 — once per MCP Jam session.** Add one stdio server: `bun apps/mcp-bridge/src/main.ts --prod` with `AQUA_API_URL=https://vercel-henna-gamma-46.vercel.app`, `AQUA_RPC_URL`, and `XDG_STATE_HOME`. First tool call opens the Room in the default browser. Type the enrolled owner, Knock, confirm on the Security Key app. Loopback `http://127.0.0.1:$AQUA_OAUTH_CALLBACK_PORT/callback`. Device stays dark on market trades unless a 409 needs the Ethereum app. Set `AQUA_LEDGER_ORIGIN_TOKEN` for Clear Signing; after a 409 delegation retry, `post_trade` may include a `clearSigning` object from the Ledger reporter.
 3. **Act 3 — every trade.** Chat `request_trade` then `post_trade` (same snake_case tools). Approve the preview. `post_trade` signs in the local LKRP keyring and pays Aqua Permit2 on the origin. You should see a trade record. A 409 `delegation-required` still uses the Ethereum app over USB.
 
 ## Local MCP bridge
@@ -179,13 +190,23 @@ The bridge discovers the Bun API's OAuth metadata, registers a loopback client, 
 
 ## Configuration
 
-Copy `.env.example` to `.env` and provide chain-specific contracts, RPC, PostgreSQL `DATABASE_URL`, SIWE identity, an absolute `AUTH_ISSUER`, and the canonical `AUTH_RESOURCE` URI used as the token audience. `PASETO_V4_SECRET_KEY` is the active `k4.secret` PASERK; `PASETO_V4_PUBLIC_KEYS` is a JSON array containing its matching `k4.public` PASERK and any retiring verification keys. Startup derives standard `k4.pid` identifiers, rejects malformed or duplicate keys, and proves that the active secret matches exactly one public key before serving requests.
+The API, workers, and facilitator load a Zod-validated runtime manifest (`schemaVersion: 1`, profile `local-anvil` or `production`) via `--config <runtime-manifest.json>` or the `AQUA_RUNTIME_MANIFEST` environment variable. Local Nix commands write `.data/runtime-manifest.json` automatically; they do not require a `.env` file.
 
-Rotate access-token keys by deploying the new public key to every verifier first, then switching the active secret key while retaining the old public key. Remove the retiring public key only after the maximum access-token lifetime has elapsed. The issuer and verifier are separate components so a future HTTP MCP resource server can validate audience-bound Bearer tokens without receiving signing material. OAuth 2.1 with PKCE, dynamic client registration, protected-resource discovery, and Ledger FIDO2 WebAuthn is implemented; access tokens are PASETO v4.public values carrying `amr: ["fido2","hwk"]`.
+The manifest owns chain identity (`chain.id`, `chain.rpcUrl`, `chain.genesisHash`, `chain.deploymentBlock`), service URLs (`services.databaseUrl`, `services.apiUrl`, `services.facilitatorUrl`, `services.brokerSocket`), SIWE/WebAuthn identity (`auth.issuer`, `auth.resource`, `auth.rpId`, `auth.origin`, `auth.pasetoPublicKeys`), every contract address plus runtime-code hash, fixture tokens and pairs, indexer start block / confirmations / allowlisted contracts, and keeper target+selector policy. Secret material is referenced as `broker://agent|facilitator|keeper|paseto`, never as raw keys in the manifest. Startup proves the broker's PASETO public key matches `auth.pasetoPublicKeys[0]`, then blocks ready until every contract's on-chain code hash matches.
 
-`ACTIVITY_CONFIRMATIONS` is required and must be chosen for the configured chain. Collection defaults to a 60-second interval, 1,000-block chunks, four concurrent subscriptions, a 120-second lease, and 100 active subscriptions per authenticated wallet. The worker and API must use the same RPC, PostgreSQL database, chain, and confirmation configuration.
+Copy [`.env.example`](.env.example) only for optional interactive overrides. It currently documents `AQUA_LOG_LEVEL`, `AQUA_STATE_DIR`, optional 1inch settings, the already-deployed Sepolia contract addresses used by `bun scripts/deploy-public-chain.ts`, and the hosted env-signer keys (`AQUA_AGENT_KEY`, `AQUA_FACILITATOR_KEY`, `AQUA_KEEPER_KEY`, `PASETO_V4_SECRET_KEY`, `DATABASE_URL`). Those last four plus `AQUA_SIGNER=env` are how Vercel signs without a Unix-socket broker.
 
-`dev` and `start` persist PostgreSQL, Anvil state, deployment evidence, encrypted keys, and the verified runtime manifest under the gitignored `.data` directory. The local chain is fixed to chain ID 31337. Its manifest contains Aqua, both SwapVM routers, WETH9, the intent controller, vault factory, BoundedMatcher, canonical Permit2, canonical x402 exact proxy, and two differently-decimalled fixture tokens. Startup blocks the API until code hashes, constructor bindings, operators, matcher permissions, fixture metadata/supply, seed receipts, and canonical addresses all verify.
+Rotate access-token keys by deploying the new `k4.public` PASERK into `auth.pasetoPublicKeys` first, then switching the active `k4.secret` while retaining the old public key. Remove the retiring public key only after the maximum access-token lifetime has elapsed. The issuer and verifier are separate so a future HTTP MCP resource server can validate audience-bound Bearer tokens without receiving signing material. Hardware OAuth tokens carry `amr: ["fido2","hwk"]`; SIWE sessions carry `amr: ["siwe"]` and cannot call trading routes.
+
+Confirmations live in `indexer.confirmations` and must be chosen for the configured chain. The activity worker defaults to a 10-second interval, 1,000-block chunks, four concurrent subscriptions, a 120-second lease, and 100 active subscriptions per authenticated wallet. The order-worker defaults to a 2-second poll and 500-block chunks. The worker and API must use the same RPC, PostgreSQL database, chain, and confirmation configuration.
+
+`dev` and `aqua-start` persist PostgreSQL, Anvil state, deployment evidence, encrypted keys, and the verified runtime manifest under the gitignored `.data` directory. The local chain is fixed to chain ID 31337. Its manifest contains Aqua, both SwapVM routers, WETH9, the intent controller, vault factory, BoundedMatcher, canonical Permit2, canonical x402 exact proxy, and two differently-decimalled fixture tokens. Startup blocks the API until code hashes, constructor bindings, operators, matcher permissions, fixture metadata/supply, seed receipts, and canonical addresses all verify.
+
+## Public / Sepolia deploy
+
+`bun scripts/deploy-public-chain.ts` writes `.data/runtime-manifest.production.json` (`profile: "production"`). The Sepolia Aqua, SwapVM routers, intent controller, vault factory, BoundedMatcher, and fixture tokens in [`.env.example`](.env.example) are already deployed; the script reuses them unless evidence is stale. It needs `DATABASE_URL`, `AQUA_DEPLOYER_PRIVATE_KEY`, `AQUA_AGENT_KEY`, `AQUA_FACILITATOR_KEY`, `AQUA_KEEPER_KEY`, `PASETO_V4_SECRET_KEY`, and the pinned upstream repo URLs (`AQUA_UPSTREAM`, `SWAPVM_UPSTREAM`, `X402_UPSTREAM`, `PERMIT2_UPSTREAM`). `AQUA_PUBLIC_ORIGIN` (or `AQUA_VERCEL_URL`) becomes the auth issuer/origin in that manifest.
+
+`aube run deploy` (or `nix develop -c deploy`) then bundles `apps/api` and `apps/facilitator` into `out/vercel` and deploys that artifact. `AQUA_PUBLIC_ORIGIN` is the sole public host; the Aliased Vercel host must match it. Unique `*.vercel.app` deployment URLs fail WebAuthn. The hosted process sets `AQUA_SIGNER=env` and signs with the env keys above; `AQUA_AGENT_KEK` is required for `/mcp`. MCP Jam still uses stdio `aqua-ledger-key-ring`, not `{AQUA_PUBLIC_ORIGIN}/mcp`.
 
 ## Speculos end-to-end evidence
 
@@ -197,13 +218,13 @@ Speculos executes real Ledger application binaries and is suitable for applicati
 
 The deployment is reused only when the entire recorded set and both deterministic seeded orders remain valid. Missing code, stale runtime hashes, wrong bindings, or incomplete evidence cause a complete redeployment and regenerated manifest. An incomplete `.data/keyring` is never overwritten: move it aside for forensic recovery or restore all four `agent.enc`, `facilitator.enc`, `keeper.enc`, and `paseto.enc` files, then run `ledger-bootstrap` again. For API-only operation, bypass the local supervisor explicitly with `nix run .#api -- --config <runtime-manifest.json>`.
 
-Set `ONEINCH_API_KEY` to enable the authenticated price endpoints. `ONEINCH_BASE_URL` defaults to `https://api.1inch.com` and `ONEINCH_DEFAULT_CURRENCY` defaults to `USD`. These settings do not affect Aqua quote/trade readiness; local Anvil chains are normally unsupported by the external price provider.
+Set `ONEINCH_API_KEY` to enable authenticated 1inch spot prices inside trade previews. There is no public `/v1/prices` or `/v1/quotes` HTTP route. `ONEINCH_BASE_URL` defaults to `https://api.1inch.com` and `ONEINCH_DEFAULT_CURRENCY` defaults to `USD`. These settings do not affect Aqua quote/trade readiness; local Anvil chains are normally unsupported by the external price provider.
 
-`ORDERBOOK_CONTRACTS` is a strict JSON array of allowlisted contracts scanned from `ORDERBOOK_START_BLOCK`; `ORDERBOOK_PAIRS` is the bounded base/quote registry. The worker recognizes the exact current Aqua `Shipped`, `Docked`, `Pushed`, and `Pulled` events and SwapVM `Swapped` event. Only a decoded SwapVM order containing the backend's exact five-instruction limit grammar is projected into the public book. Orders, fills, human-decimal prices, remaining balances, raw evidence, and the canonical checkpoint are committed transactionally. A changed checkpoint hash causes deterministic rewind and replay.
+The order-worker scans `indexer.contracts` from `indexer.startBlock` and projects only the fixture pairs in `fixtures.pairs`. It decodes Aqua `Shipped`, `Docked`, `Pushed`, and `Pulled` plus SwapVM `Swapped`; only `Shipped`, `Docked`, and `Swapped` are written into the public book. Only a decoded SwapVM order matching the backend's exact limit-grammar recognizer is projected. Orders, fills, human-decimal prices, remaining balances, raw evidence, and the canonical checkpoint are committed transactionally. A changed checkpoint hash causes deterministic rewind and replay.
 
 Market execution walks price-time-compatible liquidity in best-price order and is bounded to eight Aqua orders. FOK requires sufficient full-depth liquidity; IOC reports any unfilled human-decimal amount. Post-only and book-or-cancel reject crossing placement. Ticker, recent trades, candles, balances, Aqua virtual allocations, and open-order commitments are computed from the same confirmed projection.
 
-Keeper signing is isolated in the local Unix-socket secret broker. Its encrypted key is decrypted by `wallet-cli` and never enters an environment variable, image, API request, or log. The generated manifest restricts it to the intent controller’s `observe`/`activate`, vault-factory lifecycle `execute`, and BoundedMatcher batch `execute`; the matcher separately permits only `swap` on the two deployed routers. The worker serializes nonces through leased PostgreSQL jobs, enforces gas and fee ceilings, follows receipts, and records terminal reverts.
+On the local stack, keeper signing is isolated in the Unix-socket secret broker. Its encrypted key is decrypted by `wallet-cli` and never enters an environment variable, image, API request, or log. Hosted Vercel uses `AQUA_SIGNER=env` instead and keeps those keys in process environment. The generated manifest restricts it to the intent controller’s `observe`/`activate`, vault-factory lifecycle `execute`, and BoundedMatcher batch `execute`; the matcher separately permits only `swap` on the two deployed routers. The worker serializes nonces through leased PostgreSQL jobs, enforces gas and fee ceilings, follows receipts, and records terminal reverts.
 
 The contracts in [`contracts/`](contracts/) are security-sensitive reference implementations, not an audit. `AquaIntentController` provides EIP-712 nonce consumption and block-plus-time trigger persistence; `BoundedMatcher` caps execution at eight allowlisted target-selector calls. Production use requires an independent audit and reviewed router/program allowlists. Arbitrary Aqua programs are excluded because SwapVM instruction ordering is security-critical.
 
